@@ -2321,6 +2321,12 @@ void initServer() {
             server.db[j].pclass_mem_alloc[i] = -1; // -1 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
             server.db[j].penalty_classes[i] = dictCreate(&keyptrDictType, NULL); //维护penalty class时， key使用dict中的，不造成浪费
+            /**
+             * 在db中增加reuse time采样的支持，维护当前采样的key的访问时间
+             * @author: cheng pan
+             * @date: 2018.10.21
+             */
+            server.db[j].reuse_time_sample[j] = dictCreate(&missDictType,NULL);
         }
 
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
@@ -2656,6 +2662,16 @@ void call(redisClient *c, int flags) {
     redisOpArrayInit(&server.also_propagate);
     // 保留旧 dirty 计数器值
     dirty = server.dirty;
+
+    /**
+     * 为执行命令前的各种信息初始化
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */ 
+    // c->db->accessed_obj = NULL;
+    // c->db->before_access_size = -1;
+    // c->db->last_access_time = -1;
+
     // 计算命令开始执行的时间
     start = ustime();
     // 执行实现函数
@@ -2664,6 +2680,19 @@ void call(redisClient *c, int flags) {
     duration = ustime()-start;
     // 计算命令执行之后的 dirty 值
     dirty = server.dirty-dirty;
+
+    /**
+     * 在命令执行后，统计各种信息，比如RTH
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    // robj *o = c->db->accessed_obj;
+    // if (o != NULL) {
+    //     int rt = c->db->access_cnt - c->db->last_access_time;
+    // } 
+    // else {
+
+    // }
 
     /* When EVAL is called loading the AOF we don't want commands called
      * from Lua to go into the slowlog or to populate statistics. */
@@ -3974,7 +4003,7 @@ int freeMemoryIfNeeded(void) {
  * 此处检查各个penalty class是否有超用内存的情况
  * 如果有，释放该class中的内存，直到没有内存超用的情况
  * @author: cheng pan
- * @dat: 2018.10.21
+ * @date: 2018.10.21
  */ 
 int freePenaltyClassMemoryIfNeeded(void) {
     size_t mem_tofree, mem_freed;

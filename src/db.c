@@ -110,10 +110,9 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
          * 到达这里说明找到该key对应的value obj，此时可以根据当前redisDb中的access_cnt时间戳，
          * 计算出该obj的reuse time。
          * @author: cheng pan
-         * @date: 2018.10.20
+         * @date: 2018.10.21
          */
         //int rt = db->access_cnt - ((robj *)val)->last_access_time;
-        db->last_access_time = ((robj *)val)->last_access_time;
         calcObjectSize((robj *)val);
         db->before_access_size = ((robj *)val)->size;
         db->accessed_obj = (robj *)val;

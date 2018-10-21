@@ -512,6 +512,13 @@ typedef struct redisDb {
     long long pclass_mem_used[REDIS_MAX_PENALTY_CLASS];
     long long pclass_mem_alloc[REDIS_MAX_PENALTY_CLASS];
 
+    /**
+     * 用于reuse time的采样，维护每个key上一次访问时间
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    dict *reuse_time_sample[REDIS_MAX_PENALTY_CLASS]; // 不能和dict公用key的空间，因为dict中的key可能被evict，释放掉之后，不能访问key了。
+
     // 正处于阻塞状态的键
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
 
@@ -529,10 +536,10 @@ typedef struct redisDb {
     /**
      * 为了计算RTH， 维护全局数据库中访问次数，以及上一次时间
      * @author: cheng pan
-     * @date: 2018.10.20
+     * @date: 2018.10.21
      */
-    int access_cnt;
-    int last_access_time; // 这里的上一次访问时间，会在每次访问数据库时（processCommand, call()），在db.c中进行设置。
+    int access_cnt[REDIS_MAX_PENALTY_CLASS];
+    //int last_access_time; // 这里的上一次访问时间，会在每次访问数据库时（processCommand, call()），在db.c中进行设置。
 
     /**
      * 为了计算MRC，需要记录每次GET或者UPDATE或者DEL多少字节
