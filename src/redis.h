@@ -398,6 +398,15 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_LRU_BITS 24
 #define REDIS_LRU_CLOCK_MAX ((1<<REDIS_LRU_BITS)-1) /* Max value of obj->lru */
 #define REDIS_LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
+
+/**
+ * 记录robj size大小的位数
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+#define REDIS_ROBJ_SIZE_BITS 28
+#define REDIS_ROBJ_PCLASS_BITS 4
+
 typedef struct redisObject {
 
     // 类型
@@ -414,6 +423,27 @@ typedef struct redisObject {
 
     // 指向实际值的指针
     void *ptr;
+
+    /** 
+     * 记录对象的大小信息
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    unsigned size:REDIS_ROBJ_SIZE_BITS; 
+    /**
+     * 记录对象所属的penalty class
+     * @author: cheng pan
+     * @date: 2018.10.16
+     */
+    unsigned pclass:REDIS_ROBJ_PCLASS_BITS;
+
+    /**
+     * 为了统计访问的Reuse Time Histogram (RTH)， 需要记录每个obj上一次访问的时间戳
+     * @author: cheng pan
+     * @date: 2018.10.20
+     */
+    unsigned last_access_time;
+
 
 } robj;
 
@@ -447,6 +477,13 @@ struct evictionPoolEntry {
     sds key;                    /* Key name. */
 };
 
+/**
+ * 定义一个redis DB中最多维护多少个penalty class
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+#define REDIS_MAX_PENALTY_CLASS (1 << REDIS_ROBJ_PCLASS_BITS)
+
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
@@ -457,6 +494,23 @@ typedef struct redisDb {
 
     // 键的过期时间，字典的键为键，字典的值为过期事件 UNIX 时间戳
     dict *expires;              /* Timeout of keys with a timeout set */
+
+    /**
+     * 增加对key miss之后，miss time和miss penalty的追踪
+     * @author: cheng pan
+     * @date: 2018.10.15
+     */
+    dict *miss_times;
+    dict *miss_penalties;
+
+    /**
+     * 使用多个dict分别维护不同的penalty class包含的key
+     * @author: cheng pan
+     * @date: 2018.10.16
+     */
+    dict *penalty_classes[REDIS_MAX_PENALTY_CLASS];
+    long long pclass_mem_used[REDIS_MAX_PENALTY_CLASS];
+    long long pclass_mem_alloc[REDIS_MAX_PENALTY_CLASS];
 
     // 正处于阻塞状态的键
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
@@ -471,6 +525,22 @@ typedef struct redisDb {
 
     // 数据库号码
     int id;                     /* Database ID */
+
+    /**
+     * 为了计算RTH， 维护全局数据库中访问次数，以及上一次时间
+     * @author: cheng pan
+     * @date: 2018.10.20
+     */
+    int access_cnt;
+    int last_access_time; // 这里的上一次访问时间，会在每次访问数据库时（processCommand, call()），在db.c中进行设置。
+
+    /**
+     * 为了计算MRC，需要记录每次GET或者UPDATE或者DEL多少字节
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    int before_access_size; //操作发生前，该obj占用的字节数
+    robj *accessed_obj; //记录操作的对象，可以用来获得after_access_size; ps: del 操作会删除obj，所以需要特殊判断。
 
     // 数据库的键的平均 TTL ，统计信息
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -750,6 +820,13 @@ typedef struct zskiplist {
 
     // 表中层数最大的节点的层数
     int level;
+
+    /**
+     * 增加关于跳跃表字节大小的维护
+     * @author: cheng pan
+     * @date: 2018.10.11
+     */
+    unsigned int size; 
 
 } zskiplist;
 
@@ -1616,6 +1693,13 @@ void flagTransaction(redisClient *c);
 /* Redis object implementation */
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
+/**
+ * 增加判断size的函数
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+unsigned int valueSizeVoid(void *o);
+
 void incrRefCount(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);
@@ -1623,6 +1707,13 @@ void freeListObject(robj *o);
 void freeSetObject(robj *o);
 void freeZsetObject(robj *o);
 void freeHashObject(robj *o);
+/**
+ * 增加size的维护
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+void calcObjectSize(robj *o);
+
 robj *createObject(int type, void *ptr);
 robj *createStringObject(char *ptr, size_t len);
 robj *createRawStringObject(char *ptr, size_t len);
@@ -1734,9 +1825,22 @@ void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 unsigned int zsetLength(robj *zobj);
 void zsetConvert(robj *zobj, int encoding);
 unsigned long zslGetRank(zskiplist *zsl, double score, robj *o);
+/**
+ * 增加对跳跃表占用字节的维护
+ * @author: cheng pan
+ * @date: 2018.10.11
+ */
+unsigned int zsetBlobLen(zset *zs);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);
+/**
+ * 增加维护释放各个penalty class内存的操作
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+int freePenaltyClassMemoryIfNeeded(void);
+
 int processCommand(redisClient *c);
 void setupSignalHandlers(void);
 struct redisCommand *lookupCommand(sds name);
@@ -1826,6 +1930,18 @@ void propagateExpire(redisDb *db, robj *key);
 int expireIfNeeded(redisDb *db, robj *key);
 long long getExpire(redisDb *db, robj *key);
 void setExpire(redisDb *db, robj *key, long long when);
+/**
+ * 增加对miss time 和 miss penalty的追踪
+ * @author: cheng pan
+ * @date: 2018.10.15
+ */ 
+void setMissTime(redisDb *db, robj *key, long long when);
+long long getMissTime(redisDb *db, robj *key);
+int removeMissTime(redisDb *db, robj *key);
+void setMissPenalty(redisDb *db, robj *key, long long when);
+long long getMissPenalty(redisDb *db, robj *key);
+int removeMissPenalty(redisDb *db, robj *key);
+
 robj *lookupKey(redisDb *db, robj *key);
 robj *lookupKeyRead(redisDb *db, robj *key);
 robj *lookupKeyWrite(redisDb *db, robj *key);
@@ -1932,6 +2048,49 @@ void lindexCommand(redisClient *c);
 void lrangeCommand(redisClient *c);
 void ltrimCommand(redisClient *c);
 void typeCommand(redisClient *c);
+/**
+ * 增加kvsize命令的接口
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+void kvsizeCommand(redisClient *c);
+/**
+ * 增加mspenalty命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.15
+ */
+void mspenaltyCommand(redisClient *c); 
+/**
+ * 增加setpclass id命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+void setpclassIdCommand(redisClient *c);
+/**
+ * 增加getpclassid命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+void getpclassIdCommand(redisClient *c);
+/**
+ * 增加setpclass alloc size命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+void setpclassSizeCommand(redisClient *c);
+/**
+ * 增加getpclass alloc size命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+void getpclassSizeCommand(redisClient *c);
+/**
+ * 增加getpclass used size命令的接口
+ * @author: cheng pan
+ * @date: 2018.10.16
+ */
+void getpclassSizeUsedCommand(redisClient *c);
+
 void lsetCommand(redisClient *c);
 void saddCommand(redisClient *c);
 void sremCommand(redisClient *c);

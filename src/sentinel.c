@@ -668,6 +668,12 @@ void initSentinel(void) {
     // 初始化脚本相关选项
     sentinel.running_scripts = 0;
     sentinel.scripts_queue = listCreate();
+    /**
+     * 给链表增加valuesize计算函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    listSetValueSizeMethod(sentinel.scripts_queue, valueSizeVoid);    
 }
 
 /* This function gets called when the server is in Sentinel mode, started,

@@ -746,7 +746,12 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->repl_offset_time = 0;
     node->repl_offset = 0;
     listSetFreeMethod(node->fail_reports,zfree);
-
+    /**
+     * 给链表增加valuesize计算函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    listSetValueSizeMethod(node->fail_reports, valueSizeVoid);
     return node;
 }
 

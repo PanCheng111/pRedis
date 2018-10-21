@@ -614,6 +614,7 @@ void appendCommand(redisClient *c) {
         o = dbUnshareStringValue(c->db,c->argv[1],o);
         o->ptr = sdscatlen(o->ptr,append->ptr,sdslen(append->ptr));
         totlen = sdslen(o->ptr);
+       // printf("after append, sds size = %d\n", sdsAllocSize(o->ptr));
     }
 
     // 向数据库发送键被修改的信号

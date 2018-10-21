@@ -461,6 +461,12 @@ void listTypeConvert(robj *subject, int enc) {
         list *l = listCreate();
 
         listSetFreeMethod(l,decrRefCountVoid);
+        /**
+         * 增加计算值size的函数
+         * @author: cheng pan
+         * @date: 2018.9.19
+         */ 
+        listSetValueSizeMethod(l, valueSizeVoid);  
 
         /* listTypeGet returns a robj with incremented refcount */
         // 遍历 ziplist ，并将里面的值全部添加到双端链表中
@@ -1171,6 +1177,12 @@ void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, ro
 
             /* For every key we take a list of clients blocked for it */
             l = listCreate();
+            /**
+             * 增加计算值size的函数
+             * @author: cheng pan
+             * @date: 2018.9.19
+             */ 
+            listSetValueSizeMethod(l, valueSizeVoid);              
             retval = dictAdd(c->db->blocking_keys,keys[j],l);
             incrRefCount(keys[j]);
             redisAssertWithInfo(c,keys[j],retval == DICT_OK);
@@ -1406,6 +1418,12 @@ void handleClientsBlockedOnLists(void) {
         // 备份旧的 ready_keys ，再给服务器端赋值一个新的
         l = server.ready_keys;
         server.ready_keys = listCreate();
+        /**
+         * 增加计算值size的函数
+         * @author: cheng pan
+         * @date: 2018.9.19
+         */ 
+        listSetValueSizeMethod(server.ready_keys, valueSizeVoid); 
 
         while(listLength(l) != 0) {
 

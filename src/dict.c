@@ -200,6 +200,13 @@ dict *dictCreate(dictType *type,
 {
     dict *d = zmalloc(sizeof(*d));
 
+    /**
+     * 增加size的维护
+     * @author: cheng pan
+     * @date: 2018.10.08
+     */
+    d->size = zmalloc_size(d);
+
     _dictInit(d,type,privDataPtr);
 
     return d;
@@ -307,6 +314,12 @@ int dictExpand(dict *d, unsigned long size)
     // 程序将新哈希表赋给 0 号哈希表的指针，然后字典就可以开始处理键值对了。
     if (d->ht[0].table == NULL) {
         d->ht[0] = n;
+        /**
+         * 增加对字节size的维护
+         * @author: cheng pan
+         * @date: 2018.10.08
+         */
+        d->size += zmalloc_size(n.table); 
         return DICT_OK;
     }
 
@@ -316,6 +329,12 @@ int dictExpand(dict *d, unsigned long size)
     // 并将字典的 rehash 标识打开，让程序可以开始对字典进行 rehash
     d->ht[1] = n;
     d->rehashidx = 0;
+    /**
+     * 增加对字节size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size += zmalloc_size(n.table); 
     return DICT_OK;
 
     /* 顺带一提，上面的代码可以重构成以下形式：
@@ -365,6 +384,14 @@ int dictRehash(dict *d, int n) {
         // 如果 0 号哈希表为空，那么表示 rehash 执行完毕
         // T = O(1)
         if (d->ht[0].used == 0) {
+
+            /**
+             * 增加字节size的维护
+             * @author: cheng pan
+             * @date: 2018.10.09
+             */
+            d->size -= zmalloc_size(d->ht[0].table);
+
             // 释放 0 号哈希表
             zfree(d->ht[0].table);
             // 将原来的 1 号哈希表设置为新的 0 号哈希表
@@ -498,6 +525,12 @@ int dictAdd(dict *d, void *key, void *val)
     // T = O(1)
     dictSetVal(d, entry, val);
 
+    /**
+     * 增加对hash表字节长度的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size += zmalloc_size(entry) + dictGetEntryKeySize(d, entry) + dictGetEntryValueSize(d, entry);
     // 添加成功
     return DICT_OK;
 }
@@ -602,9 +635,22 @@ int dictReplace(dict *d, void *key, void *val)
      * reverse. */
     // 先保存原有的值的指针
     auxentry = *entry;
+    /**
+     * 增加对字典size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size -= dictGetEntryValueSize(d, entry); 
     // 然后设置新的值
     // T = O(1)
     dictSetVal(d, entry, val);
+    /**
+     * 增加对字典size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size += dictGetEntryValueSize(d, entry); 
+
     // 然后释放旧值
     // T = O(1)
     dictFreeVal(d, &auxentry);
@@ -691,12 +737,26 @@ static int dictGenericDelete(dict *d, const void *key, int nofree)
 
                 // 释放调用键和值的释放函数？
                 if (!nofree) {
+                    /**
+                     * 增加对字典size的维护
+                     * @author: cheng pan
+                     * @date: 2018.10.09
+                     */
+                    d->size -= dictGetEntryKeySize(d, he);
+                    d->size -= dictGetEntryValueSize(d, he);
+
                     dictFreeKey(d, he);
                     dictFreeVal(d, he);
                 }
                 
+                /**
+                 * 增加对字典size的维护
+                 * @author: cheng pan
+                 * @date: 2018.10.09
+                 */
+                d->size -= zmalloc_size(he);
                 // 释放节点本身
-                zfree(he);
+                zfree(he); 
 
                 // 更新已使用节点数量
                 d->ht[table].used--;
@@ -767,9 +827,25 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
         while(he) {
             nextHe = he->next;
             // 删除键
+
+            /**
+             * 增加对字典size的维护
+             * @author: cheng pan
+             * @date: 2018.10.09
+             */
+            d->size -= dictGetEntryKeySize(d, he);
+            d->size -= dictGetEntryValueSize(d, he);
+             
             dictFreeKey(d, he);
             // 删除值
             dictFreeVal(d, he);
+            
+             /**
+             * 增加对字典size的维护
+             * @author: cheng pan
+             * @date: 2018.10.09
+             */
+            d->size -= zmalloc_size(he);           
             // 释放节点
             zfree(he);
 
@@ -782,6 +858,13 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
     }
 
     /* Free the table and the allocated cache structure */
+    /**
+     * 增加对字典size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size -= zmalloc_size(ht->table);
+
     // 释放哈希表结构
     zfree(ht->table);
 
@@ -836,6 +919,7 @@ dictEntry *dictFind(dict *d, const void *key)
 
         // 遍历给定索引上的链表的所有节点，查找 key
         he = d->ht[table].table[idx];
+        //printf("idx = %d, he = %lx\n", idx, he);
         // T = O(1)
         while(he) {
 
@@ -1511,6 +1595,13 @@ void dictEmpty(dict *d, void(callback)(void*)) {
     // 重置属性 
     d->rehashidx = -1;
     d->iterators = 0;
+
+    /**
+     * 增加对字节size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */
+    d->size = 0; 
 }
 
 /*
@@ -1530,6 +1621,15 @@ void dictEnableResize(void) {
 void dictDisableResize(void) {
     dict_can_resize = 0;
 }
+
+/**
+ * 增加对字典size的维护，返回字典占用的字节数
+ * @author: cheng pan
+ * @date: 2018.10.09
+ */
+unsigned int dictBlobLen(dict *d) {
+    return d->size;
+} 
 
 #if 0
 

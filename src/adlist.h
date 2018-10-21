@@ -82,6 +82,20 @@ typedef struct list {
     // 节点值对比函数
     int (*match)(void *ptr, void *key);
 
+    /**
+     * 计算节点值占用的字节大小
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    unsigned int (*valueSize)(void *ptr); 
+
+    /**
+     * 维护链表的占用字节数
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    unsigned int size; 
+
     // 链表所包含的节点数量
     unsigned long len;
 
@@ -116,6 +130,13 @@ typedef struct list {
 // 将链表的对比函数设置为 m
 // T = O(1)
 #define listSetMatchMethod(l,m) ((l)->match = (m))
+/**
+ * 给链表添加计算值大小的函数
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+#define listSetValueSizeMethod(l,m) ((l)->valueSize = (m))
+
 
 // 返回给定链表的值复制函数
 // T = O(1)
@@ -126,6 +147,12 @@ typedef struct list {
 // 返回给定链表的值对比函数
 // T = O(1)
 #define listGetMatchMethod(l) ((l)->match)
+/**
+ * 返回链表添加的计算值大小的函数
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+#define listGetValueSizeMethod(l) ((l)->valueSize)
 
 /* Prototypes */
 list *listCreate(void);
@@ -143,6 +170,12 @@ listNode *listIndex(list *list, long index);
 void listRewind(list *list, listIter *li);
 void listRewindTail(list *list, listIter *li);
 void listRotate(list *list);
+/**
+ * 返回链表占用的字节数
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+unsigned int listBlobLen(list *list);
 
 /* Directions for iterators 
  *

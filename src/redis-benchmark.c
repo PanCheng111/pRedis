@@ -49,6 +49,15 @@
 #define REDIS_NOTUSED(V) ((void) V)
 #define RANDPTR_INITIAL_SIZE 8
 
+/**
+ * 判断一个值的size大小
+ * @author: cheng pan
+ * @date： 2018.9.19
+ */
+unsigned int valueSizeVoid(void *ptr) {
+    return 0;
+} 
+
 static struct config {
     aeEventLoop *el;
     const char *hostip;
@@ -646,6 +655,13 @@ int main(int argc, const char **argv) {
     config.hostsocket = NULL;
     config.tests = NULL;
     config.dbnum = 0;
+
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(config.clients, valueSizeVoid);  
 
     i = parseOptions(argc,argv);
     argc -= i;

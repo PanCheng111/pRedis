@@ -1971,6 +1971,12 @@ void replicationScriptCacheInit(void) {
     server.repl_scriptcache_dict = dictCreate(&replScriptCacheDictType,NULL);
     // FIFO 队列
     server.repl_scriptcache_fifo = listCreate();
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(server.repl_scriptcache_fifo, valueSizeVoid);      
 }
 
 /* Empty the script cache. Should be called every time we are no longer sure
@@ -1995,6 +2001,12 @@ void replicationScriptCacheFlush(void) {
     dictEmpty(server.repl_scriptcache_dict,NULL);
     listRelease(server.repl_scriptcache_fifo);
     server.repl_scriptcache_fifo = listCreate();
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(server.repl_scriptcache_fifo, valueSizeVoid);  
 }
 
 /* Add an entry into the script cache, if we reach max number of entries the

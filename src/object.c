@@ -32,6 +32,68 @@
 #include <math.h>
 #include <ctype.h>
 
+/**
+ * 计算给定的Redis Obj的字节数
+ * @author: cheng pan
+ * @date: 2018.9.18
+ */
+void calcObjectSize(robj *o) {
+    // printf("calc obj size: encoding: %s\n", strEncoding(o->encoding));
+    // if (o->encoding == REDIS_ENCODING_RAW) printf("raw string = %s\n", (sds)o->ptr);
+    switch (o->type) {
+        case REDIS_STRING:
+            if (o->encoding == REDIS_ENCODING_INT)
+                o->size = zmalloc_size(o);
+            else if (o->encoding == REDIS_ENCODING_EMBSTR)
+                o->size = zmalloc_size(o);
+            else if (o->encoding == REDIS_ENCODING_RAW) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += sdsAllocSize(o->ptr);//zmalloc_size(o->ptr - sizeof(struct sdshdr));
+            }
+            break;
+        case REDIS_LIST:
+            if (o->encoding == REDIS_ENCODING_ZIPLIST) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);
+            }
+            else if (o->encoding == REDIS_ENCODING_LINKEDLIST) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += listBlobLen((struct list*)o->ptr);
+            }
+            break;
+        case REDIS_HASH:
+            if (o->encoding == REDIS_ENCODING_ZIPLIST) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);
+            }
+            else if (o->encoding == REDIS_ENCODING_HT) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += dictBlobLen((struct dict*)o->ptr);//
+            }
+            break;
+        case REDIS_SET:
+            if (o->encoding == REDIS_ENCODING_INTSET) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += intsetBlobLen((struct intset*)o->ptr);
+            }
+            else if (o->encoding == REDIS_ENCODING_HT) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += dictBlobLen((struct dict*)o->ptr);//
+            }
+            break;
+        case REDIS_ZSET:
+            if (o->encoding == REDIS_ENCODING_ZIPLIST) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);                
+            }
+            else if (o->encoding == REDIS_ENCODING_SKIPLIST) {
+                o->size = zmalloc_size(o);
+                if (o->ptr != NULL) o->size += zsetBlobLen((struct zset*)o->ptr);//                
+            }
+            break;
+    }
+}
+
 /*
  * 创建一个新 robj 对象
  */
@@ -46,6 +108,12 @@ robj *createObject(int type, void *ptr) {
 
     /* Set the LRU to the current lruclock (minutes resolution). */
     o->lru = LRU_CLOCK();
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    //calcObjectSize(o); 此处不能计算大小，因为此时encoding还不能确定下来，不一定是REDIS_ENCODING_RAW
     return o;
 }
 
@@ -54,7 +122,14 @@ robj *createObject(int type, void *ptr) {
 // 创建一个 REDIS_ENCODING_RAW 编码的字符对象
 // 对象的指针指向一个 sds 结构
 robj *createRawStringObject(char *ptr, size_t len) {
-    return createObject(REDIS_STRING,sdsnewlen(ptr,len));
+    /**
+     * 修改此处创建RAW格式字符串时，增加size的维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    robj *o = createObject(REDIS_STRING,sdsnewlen(ptr,len));
+    calcObjectSize(o);
+    return o;
 }
 
 /* Create a string object with encoding REDIS_ENCODING_EMBSTR, that is
@@ -81,6 +156,12 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
     } else {
         memset(sh->buf,0,len+1);
     }
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    calcObjectSize(o);     
     return o;
 }
 
@@ -122,14 +203,31 @@ robj *createStringObjectFromLongLong(long long value) {
             o = createObject(REDIS_STRING, NULL);
             o->encoding = REDIS_ENCODING_INT;
             o->ptr = (void*)((long)value);
+            /**
+             * 增加size维护
+             * @author: cheng pan
+             * @date: 2018.9.18
+             */
+            //o->size = zmalloc_size(o);     
 
         // 值不能用 long 类型保存（long long 类型），将值转换为字符串，
         // 并创建一个 REDIS_ENCODING_RAW 的字符串对象来保存值
         } else {
             o = createObject(REDIS_STRING,sdsfromlonglong(value));
+            /**
+             * 此时已经确定encoding为REDIS_ENCODING_RAW，故更新o的size
+             * @author: cheng pan
+             * @date: 2018.9.19
+             */
+            //o->calcObjectSize(o);
         }
     }
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -203,6 +301,12 @@ robj *dupStringObject(robj *o) {
         d = createObject(REDIS_STRING, NULL);
         d->encoding = REDIS_ENCODING_INT;
         d->ptr = o->ptr;
+        /**
+         * 增加size维护
+         * @author: cheng pan
+         * @date: 2018.9.18
+         */
+        calcObjectSize(d);
         return d;
 
     default:
@@ -221,9 +325,20 @@ robj *createListObject(void) {
     robj *o = createObject(REDIS_LIST,l);
 
     listSetFreeMethod(l,decrRefCountVoid);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(l, valueSizeVoid);  
 
     o->encoding = REDIS_ENCODING_LINKEDLIST;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -237,7 +352,12 @@ robj *createZiplistObject(void) {
     robj *o = createObject(REDIS_LIST,zl);
 
     o->encoding = REDIS_ENCODING_ZIPLIST;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -251,7 +371,12 @@ robj *createSetObject(void) {
     robj *o = createObject(REDIS_SET,d);
 
     o->encoding = REDIS_ENCODING_HT;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -265,7 +390,12 @@ robj *createIntsetObject(void) {
     robj *o = createObject(REDIS_SET,is);
 
     o->encoding = REDIS_ENCODING_INTSET;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -279,7 +409,12 @@ robj *createHashObject(void) {
     robj *o = createObject(REDIS_HASH, zl);
 
     o->encoding = REDIS_ENCODING_ZIPLIST;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -298,7 +433,12 @@ robj *createZsetObject(void) {
     o = createObject(REDIS_ZSET,zs);
 
     o->encoding = REDIS_ENCODING_SKIPLIST;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -312,7 +452,12 @@ robj *createZsetZiplistObject(void) {
     robj *o = createObject(REDIS_ZSET,zl);
 
     o->encoding = REDIS_ENCODING_ZIPLIST;
-
+    /**
+     * 增加size维护
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    calcObjectSize(o);
     return o;
 }
 
@@ -455,6 +600,16 @@ void decrRefCountVoid(void *o) {
     decrRefCount(o);
 }
 
+/**
+ * 判断一个值的size大小
+ * @author: cheng pan
+ * @date： 2018.9.19
+ */
+unsigned int valueSizeVoid(void *ptr) {
+    calcObjectSize((robj *)ptr);
+    return ((robj *)ptr)->size;
+} 
+
 /* This function set the ref count to zero without freeing the object.
  *
  * 这个函数将对象的引用计数设为 0 ，但并不释放对象。
@@ -567,6 +722,12 @@ robj *tryObjectEncoding(robj *o) {
             if (o->encoding == REDIS_ENCODING_RAW) sdsfree(o->ptr);
             o->encoding = REDIS_ENCODING_INT;
             o->ptr = (void*) value;
+            /**
+             * 增加size的维护
+             * @author: cheng pan
+             * @date: 2018.9.19
+             */
+            calcObjectSize(o); 
             return o;
         }
     }
@@ -599,6 +760,12 @@ robj *tryObjectEncoding(robj *o) {
         sdsavail(s) > len/10)
     {
         o->ptr = sdsRemoveFreeSpace(o->ptr);
+        /**
+         * 增加size的维护
+         * @author: cheng pan
+         * @date: 2018.9.19
+         */
+        calcObjectSize(o); 
     }
 
     /* Return the original object. */

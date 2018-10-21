@@ -102,6 +102,15 @@ typedef struct dictType {
     // 销毁值的函数
     void (*valDestructor)(void *privdata, void *obj);
 
+
+    /**
+     * 增加对字典中entry key/value size的维护
+     * @author: cheng pan
+     * @date: 2018.10.09
+     */ 
+    unsigned int (*entryKeySize)(const void *obj);
+    unsigned int (*entryValueSize)(const void *obj);
+
 } dictType;
 
 
@@ -149,6 +158,13 @@ typedef struct dict {
 
     // 目前正在运行的安全迭代器的数量
     int iterators; /* number of iterators currently running */
+
+    /**
+     * 添加对字节size的维护
+     * @author: cheng pan
+     * @date: 2018.10.7
+     */
+    unsigned int size; 
 
 } dict;
 
@@ -233,6 +249,20 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
     (((d)->type->keyCompare) ? \
         (d)->type->keyCompare((d)->privdata, key1, key2) : \
         (key1) == (key2))
+/**
+ * 增加对于字典中占用字节size的维护
+ * @author: cheng pan
+ * @date: 2018.10.09
+ */
+#define dictGetEntryKeySize(d, entry) \
+     (((d)->type->entryKeySize) ? \
+        (d)->type->entryKeySize(entry->key) : \
+        0 )
+#define dictGetEntryValueSize(d, entry) \
+     (((d)->type->entryValueSize) ? \
+        (d)->type->entryValueSize(entry->v.val) : \
+        0 )
+
 
 // 计算给定键的哈希值
 #define dictHashKey(d, key) (d)->type->hashFunction(key)
@@ -281,6 +311,12 @@ int dictRehashMilliseconds(dict *d, int ms);
 void dictSetHashFunctionSeed(unsigned int initval);
 unsigned int dictGetHashFunctionSeed(void);
 unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, void *privdata);
+/**
+ * 增加dict字节维护
+ * @author: cheng pan
+ * @date: 2018.10.07
+ */
+unsigned int dictBlobLen(dict *d);
 
 /* Hash table types */
 extern dictType dictTypeHeapStringCopyKey;

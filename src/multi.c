@@ -359,6 +359,13 @@ void watchForKey(redisClient *c, robj *key) {
     if (!clients) { 
         // 值为链表
         clients = listCreate();
+        /**
+         * 增加计算值size的函数
+         * @author: cheng pan
+         * @date: 2018.9.19
+         */ 
+        listSetValueSizeMethod(clients, valueSizeVoid);
+      
         // 关联键值对到字典
         dictAdd(c->db->watched_keys,key,clients);
         incrRefCount(key);

@@ -86,6 +86,12 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
             clients = listCreate();
             dictAdd(server.pubsub_channels,channel,clients);
             incrRefCount(channel);
+            /**
+             * 增加计算值size的函数
+             * @author: cheng pan
+             * @date: 2018.9.19
+             */ 
+            listSetValueSizeMethod(clients, valueSizeVoid);              
         } else {
             clients = dictGetVal(de);
         }

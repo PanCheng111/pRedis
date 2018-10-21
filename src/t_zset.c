@@ -75,6 +75,15 @@
 static int zslLexValueGteMin(robj *value, zlexrangespec *spec);
 static int zslLexValueLteMax(robj *value, zlexrangespec *spec);
 
+/**
+ * 增加对zset中占用字节的维护
+ * @author: cheng pan
+ * @date: 2018.10.15
+ */ 
+unsigned int zsetBlobLen(zset *zs) {
+    return dictBlobLen(zs->dict) + zs->zsl->size;
+} 
+
 /*
  * 创建一个层数为 level 的跳跃表节点，
  * 并将节点的成员对象设置为 obj ，分值设置为 score 。
@@ -123,6 +132,13 @@ zskiplist *zslCreate(void) {
     // 设置表尾
     zsl->tail = NULL;
 
+
+    /**
+     * 增加对跳跃表占用字节的维护
+     * @author: cheng pan
+     * @date: 2018.10.11
+     */
+    zsl->size = zmalloc_size(zsl) + zmalloc_size(zsl->header);
     return zsl;
 }
 
@@ -303,6 +319,13 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     // 跳跃表的节点计数增一
     zsl->length++;
 
+    /**
+     * 增加对跳跃表占用字节的维护
+     * @author: cheng pan
+     * @date: 2018.10.11
+     */
+    zsl->size += zmalloc_size(x);
+
     return x;
 }
 
@@ -315,6 +338,13 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
  */
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
+
+    /**
+     * 增加对跳跃表占用字节的维护
+     * @author: cheng pan
+     * @date: 2018.10.11
+     */
+    zsl->size -= zmalloc_size(x);
 
     // 更新所有和被删除节点 x 有关的节点的指针，解除它们之间的关系
     // T = O(1)
@@ -382,6 +412,12 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
     if (x && score == x->score && equalStringObjects(x->obj,obj)) {
         // T = O(1)
         zslDeleteNode(zsl, x, update);
+        /**
+         * 增加对跳跃表占用字节的维护
+         * @author: cheng pan
+         * @date: 2018.10.11
+         * @description: 因为此处在zslDeleteNode()函数中已经对zsl->size进行维护，所以此处可以不用更新zsl->size
+         */ 
         // T = O(1)
         zslFreeNode(x);
         return 1;

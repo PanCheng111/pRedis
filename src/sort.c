@@ -281,6 +281,12 @@ void sortCommand(redisClient *c) {
 	// 操作可以是 GET 、 DEL 、 INCR 或者 DECR
     operations = listCreate();
     listSetFreeMethod(operations,zfree);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(operations, valueSizeVoid);      
 
 	// 指向参数位置
     j = 2; /* options start at argv[2] */

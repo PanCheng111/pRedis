@@ -96,6 +96,12 @@ void aofRewriteBufferReset(void) {
     // 初始化新的缓存（链表）
     server.aof_rewrite_buf_blocks = listCreate();
     listSetFreeMethod(server.aof_rewrite_buf_blocks,zfree);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(server.aof_rewrite_buf_blocks, valueSizeVoid);    
 }
 
 /* Return the current size of the AOF rerwite buffer. 
@@ -796,6 +802,13 @@ struct redisClient *createFakeClient(void) {
     listSetFreeMethod(c->reply,decrRefCountVoid);
     listSetDupMethod(c->reply,dupClientReplyValue);
     initClientMultiState(c);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(c->reply, valueSizeVoid);  
+    listSetValueSizeMethod(c->watched_keys, valueSizeVoid);  
 
     return c;
 }

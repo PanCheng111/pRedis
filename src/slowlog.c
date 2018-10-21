@@ -155,6 +155,12 @@ void slowlogInit(void) {
 
     // 日志链表的释构函数
     listSetFreeMethod(server.slowlog,slowlogFreeEntry);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(server.slowlog, valueSizeVoid);      
 }
 
 /* Push a new entry into the slow log.

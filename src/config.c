@@ -1237,6 +1237,12 @@ void rewriteConfigAddLineNumberToOption(struct rewriteConfigState *state, sds op
     if (l == NULL) {
         l = listCreate();
         dictAdd(state->option_to_line,sdsdup(option),l);
+        /**
+         * 增加计算值size的函数
+         * @author: cheng pan
+         * @date: 2018.9.19
+         */ 
+        listSetValueSizeMethod(l, valueSizeVoid);          
     }
     listAddNodeTail(l,(void*)(long)linenum);
 }

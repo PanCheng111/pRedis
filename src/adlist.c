@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include "adlist.h"
 #include "zmalloc.h"
+//#include "redis.h"
 
 /* Create a new list. The created list can be freed with
  * AlFreeList(), but private value of every node need to be freed
@@ -59,6 +60,14 @@ list *listCreate(void)
     list->dup = NULL;
     list->free = NULL;
     list->match = NULL;
+    
+    /**
+     * 维护链表占用字节数
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */ 
+    list->valueSize = NULL;
+    list->size = zmalloc_size(list);    
 
     return list;
 }
@@ -137,6 +146,13 @@ list *listAddNodeHead(list *list, void *value)
     // 更新链表节点数
     list->len++;
 
+    /**
+     * 维护链表占用字节数
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */ 
+    list->size += zmalloc_size(node) + list->valueSize(node->value);
+
     return list;
 }
 
@@ -180,6 +196,13 @@ list *listAddNodeTail(list *list, void *value)
 
     // 更新链表节点数
     list->len++;
+    
+    /**
+     * 维护链表占用字节数 ??
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */ 
+    list->size += zmalloc_size(node) + list->valueSize(node->value);
 
     return list;
 }
@@ -232,6 +255,13 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     // 更新链表节点数
     list->len++;
 
+    /**
+     * 维护链表占用字节数
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */ 
+    list->size += zmalloc_size(node) + list->valueSize(node->value);;
+
     return list;
 }
 
@@ -260,9 +290,23 @@ void listDelNode(list *list, listNode *node)
     else
         list->tail = node->prev;
 
+    /**
+     * 更新链表占用字节大小
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    list->size -= list->valueSize(node->value);
+
     // 释放值
     if (list->free) list->free(node->value);
 
+    /**
+     * 更新链表占用字节大小
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */
+    list->size -= zmalloc_size(node);
+    
     // 释放节点
     zfree(node);
 
@@ -415,6 +459,12 @@ list *listDup(list *orig)
     copy->dup = orig->dup;
     copy->free = orig->free;
     copy->match = orig->match;
+    /**
+     * 更新复制节点的字节计算函数
+     * @author: cheng pan
+     * @date: 2018.9.18
+     */ 
+    copy->valueSize = orig->valueSize;
 
     // 迭代整个输入链表
     iter = listGetIterator(orig, AL_START_HEAD);
@@ -431,6 +481,12 @@ list *listDup(list *orig)
             }
         } else
             value = node->value;
+            /**
+             * 增加copy列表的字节数
+             * @author: cheng pan
+             * @date:2018.9.18
+             */
+            //copy->size += copy->valueSize(value); 不需要了，因为下面listAddNodeTail会更新链表的size
 
         // 将节点添加到链表
         if (listAddNodeTail(copy, value) == NULL) {
@@ -553,3 +609,12 @@ void listRotate(list *list) {
     tail->next = list->head;
     list->head = tail;
 }
+
+/**
+ * 返回链表占用的字节数
+ * @author: cheng pan
+ * @date: 2018.9.19
+ */
+unsigned int listBlobLen(list *list) {
+    return list->size;
+} 

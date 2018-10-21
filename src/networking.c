@@ -74,6 +74,7 @@ int listMatchObjects(void *a, void *b) {
  */
 redisClient *createClient(int fd) {
 
+    //printf("enter createClient\n");
     // 分配空间
     redisClient *c = zmalloc(sizeof(redisClient));
 
@@ -156,6 +157,12 @@ redisClient *createClient(int fd) {
     // 回复链表的释放和复制函数
     listSetFreeMethod(c->reply,decrRefCountVoid);
     listSetDupMethod(c->reply,dupClientReplyValue);
+    /**
+     * 给链表增加valuesize计算函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */
+    listSetValueSizeMethod(c->reply, valueSizeVoid);
     // 阻塞类型
     c->btype = REDIS_BLOCKED_NONE;
     // 阻塞超时
@@ -176,8 +183,16 @@ redisClient *createClient(int fd) {
     c->peerid = NULL;
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
+    /**
+     * 增加计算值size的函数
+     * @author: cheng pan
+     * @date: 2018.9.19
+     */ 
+    listSetValueSizeMethod(c->pubsub_patterns, valueSizeVoid);
+    listSetValueSizeMethod(c->watched_keys, valueSizeVoid);
+
     // 如果不是伪客户端，那么添加到服务器的客户端链表中
-    if (fd != -1) listAddNodeTail(server.clients,c);
+    if (fd != -1) listAddNodeTail(server.clients,c);  //listAddNodeTail会触发size的维护，要给server.clients添加valueSize函数！
     // 初始化客户端的事务状态
     initClientMultiState(c);
 
@@ -792,6 +807,7 @@ static void acceptCommonHandler(int fd, int flags) {
  * 创建一个 TCP 连接处理器
  */
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+    //printf("enter acceptTcpHandler\n");
     int cport, cfd, max = MAX_ACCEPTS_PER_CALL;
     char cip[REDIS_IP_STR_LEN];
     REDIS_NOTUSED(el);
@@ -1484,6 +1500,7 @@ int processMultibulkBuffer(redisClient *c) {
 // 处理客户端输入的命令内容
 void processInputBuffer(redisClient *c) {
 
+    //printf("enter processInputBuffer\n");
     /* Keep processing while there is something in the input buffer */
     // 尽可能地处理查询缓冲区中的内容
     // 如果读取出现 short read ，那么可能会有内容滞留在读取缓冲区里面
@@ -1546,6 +1563,9 @@ void processInputBuffer(redisClient *c) {
  * 读取客户端的查询缓冲区内容
  */
 void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
+
+    //printf("enter readQueryFromClient\n");
+
     redisClient *c = (redisClient*) privdata;
     int nread, readlen;
     size_t qblen;

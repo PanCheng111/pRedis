@@ -2213,6 +2213,13 @@ int main(int argc, char **argv) {
             zl = ziplistNew();
             ref = listCreate();
             listSetFreeMethod(ref,sdsfree);
+            /**
+             * 增加计算值size的函数
+             * @author: cheng pan
+             * @date: 2018.9.19
+             */ 
+            listSetValueSizeMethod(ref, valueSizeVoid);  
+
             len = rand() % 256;
 
             /* Create lists */
