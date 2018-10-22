@@ -628,8 +628,7 @@ unsigned int dictEncObjHash(const void *key) {
  */
 unsigned int dictRedisObjectSize(const void *ptr) {
     robj *o = (robj *)ptr;
-    calcObjectSize(o);
-    return o->size;
+    return calcObjectSize(o);
 }
 
 /**
@@ -1881,7 +1880,7 @@ void createSharedObjects(void) {
     for (j = 0; j < REDIS_SHARED_INTEGERS; j++) {
         shared.integers[j] = createObject(REDIS_STRING,(void*)(long)j);
         shared.integers[j]->encoding = REDIS_ENCODING_INT;
-        calcObjectSize(shared.integers[j]);
+        //calcObjectSize(shared.integers[j]);
     }
 
     // 常用长度 bulk 或者 multi bulk 回复
@@ -2309,7 +2308,14 @@ void initServer() {
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
-
+        /**
+         * 在db中增加对key-value占用内存size的追踪， 同时维护key所属的penalty class id
+         * 在dict中，维护的格式为|---null(28bit)---|pcid(4 bit)|----size(32bit)-----|
+         * @author: cheng pan
+         * @date: 2018.10.21
+         */
+        server.db[j].size_pcid = dictCreate(&missDictType, NULL);
+        
         /**
          * 在db中增加miss数据的追踪，维护miss发生的时间和miss penalty
          * @author: cheng pan

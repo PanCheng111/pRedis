@@ -58,6 +58,14 @@
 // 用这个宏来避免编译器错误
 #define DICT_NOTUSED(V) ((void) V)
 
+/**
+ * 定义32位二进制掩码
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+#define HIGH32BITMASK 0xFFFFFFFF0000
+#define LOW32BITMASK 0x00000000FFFFFFFF
+
 /*
  * 哈希表节点
  */
@@ -231,6 +239,21 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define dictSetUnsignedIntegerVal(entry, _val_) \
     do { entry->v.u64 = _val_; } while(0)
 
+/**
+ * 将一个无符号的32位整数设置为节点的低32位值
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+#define dictSetUnsigned32LowVal(entry, _val_) \
+    do { entry->v.u64 = (entry->v.u64 & HIGH32BITMASK) | (_val_); } while(0)
+/**
+ * 将一个无符号的32位整数设置为节点的高32位值
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+#define dictSetUnsigned32HighVal(entry, _val_) \
+    do { entry->v.u64 = (entry->v.u64 & LOW32BITMASK) | (((long long)(_val_)) << 32); } while(0)
+
 // 释放给定字典节点的键
 #define dictFreeKey(d, entry) \
     if ((d)->type->keyDestructor) \
@@ -274,6 +297,19 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define dictGetSignedIntegerVal(he) ((he)->v.s64)
 // 返回给定节点的无符号整数值
 #define dictGetUnsignedIntegerVal(he) ((he)->v.u64)
+/**
+ * 返回获取给定节点的无符号32位整数的高位部分
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+#define dictGetUnsigned32HighVal(he) ((unsigned)(((he)->v.u64 & HIGH32BITMASK) >> 32)) 
+/**
+ * 返回获取给定节点的无符号32位整数的低位部分
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+#define dictGetUnsigned32LowVal(he) ((unsigned)((he)->v.u64 & LOW32BITMASK))
+
 // 返回给定字典的大小
 #define dictSlots(d) ((d)->ht[0].size+(d)->ht[1].size)
 // 返回字典的已有节点数量

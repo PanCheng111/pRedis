@@ -37,61 +37,63 @@
  * @author: cheng pan
  * @date: 2018.9.18
  */
-void calcObjectSize(robj *o) {
+unsigned int calcObjectSize(robj *o) {
     // printf("calc obj size: encoding: %s\n", strEncoding(o->encoding));
     // if (o->encoding == REDIS_ENCODING_RAW) printf("raw string = %s\n", (sds)o->ptr);
+    unsigned size = 0;
     switch (o->type) {
         case REDIS_STRING:
             if (o->encoding == REDIS_ENCODING_INT)
-                o->size = zmalloc_size(o);
+                size = zmalloc_size(o);
             else if (o->encoding == REDIS_ENCODING_EMBSTR)
-                o->size = zmalloc_size(o);
+                size = zmalloc_size(o);
             else if (o->encoding == REDIS_ENCODING_RAW) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += sdsAllocSize(o->ptr);//zmalloc_size(o->ptr - sizeof(struct sdshdr));
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += sdsAllocSize(o->ptr);//zmalloc_size(o->ptr - sizeof(struct sdshdr));
             }
             break;
         case REDIS_LIST:
             if (o->encoding == REDIS_ENCODING_ZIPLIST) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += ziplistBlobLen((unsigned char *)o->ptr);
             }
             else if (o->encoding == REDIS_ENCODING_LINKEDLIST) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += listBlobLen((struct list*)o->ptr);
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += listBlobLen((struct list*)o->ptr);
             }
             break;
         case REDIS_HASH:
             if (o->encoding == REDIS_ENCODING_ZIPLIST) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += ziplistBlobLen((unsigned char *)o->ptr);
             }
             else if (o->encoding == REDIS_ENCODING_HT) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += dictBlobLen((struct dict*)o->ptr);//
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += dictBlobLen((struct dict*)o->ptr);//
             }
             break;
         case REDIS_SET:
             if (o->encoding == REDIS_ENCODING_INTSET) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += intsetBlobLen((struct intset*)o->ptr);
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += intsetBlobLen((struct intset*)o->ptr);
             }
             else if (o->encoding == REDIS_ENCODING_HT) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += dictBlobLen((struct dict*)o->ptr);//
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += dictBlobLen((struct dict*)o->ptr);//
             }
             break;
         case REDIS_ZSET:
             if (o->encoding == REDIS_ENCODING_ZIPLIST) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += ziplistBlobLen((unsigned char *)o->ptr);                
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += ziplistBlobLen((unsigned char *)o->ptr);                
             }
             else if (o->encoding == REDIS_ENCODING_SKIPLIST) {
-                o->size = zmalloc_size(o);
-                if (o->ptr != NULL) o->size += zsetBlobLen((struct zset*)o->ptr);//                
+                size = zmalloc_size(o);
+                if (o->ptr != NULL) size += zsetBlobLen((struct zset*)o->ptr);//                
             }
             break;
     }
+    return size;
 }
 
 /*
@@ -128,7 +130,7 @@ robj *createRawStringObject(char *ptr, size_t len) {
      * @date: 2018.9.19
      */ 
     robj *o = createObject(REDIS_STRING,sdsnewlen(ptr,len));
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -161,7 +163,7 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
      * @author: cheng pan
      * @date: 2018.9.18
      */
-    calcObjectSize(o);     
+    //calcObjectSize(o);     
     return o;
 }
 
@@ -227,7 +229,7 @@ robj *createStringObjectFromLongLong(long long value) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -306,7 +308,7 @@ robj *dupStringObject(robj *o) {
          * @author: cheng pan
          * @date: 2018.9.18
          */
-        calcObjectSize(d);
+        //calcObjectSize(d);
         return d;
 
     default:
@@ -338,7 +340,7 @@ robj *createListObject(void) {
      * @author: cheng pan
      * @date: 2018.9.18
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -357,7 +359,7 @@ robj *createZiplistObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -376,7 +378,7 @@ robj *createSetObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -395,7 +397,7 @@ robj *createIntsetObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -414,7 +416,7 @@ robj *createHashObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -438,7 +440,7 @@ robj *createZsetObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -457,7 +459,7 @@ robj *createZsetZiplistObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */
-    calcObjectSize(o);
+    //calcObjectSize(o);
     return o;
 }
 
@@ -606,8 +608,7 @@ void decrRefCountVoid(void *o) {
  * @date： 2018.9.19
  */
 unsigned int valueSizeVoid(void *ptr) {
-    calcObjectSize((robj *)ptr);
-    return ((robj *)ptr)->size;
+    return calcObjectSize((robj *)ptr);
 } 
 
 /* This function set the ref count to zero without freeing the object.
@@ -727,7 +728,7 @@ robj *tryObjectEncoding(robj *o) {
              * @author: cheng pan
              * @date: 2018.9.19
              */
-            calcObjectSize(o); 
+            //calcObjectSize(o); 
             return o;
         }
     }
@@ -765,7 +766,7 @@ robj *tryObjectEncoding(robj *o) {
          * @author: cheng pan
          * @date: 2018.9.19
          */
-        calcObjectSize(o); 
+        //calcObjectSize(o); 
     }
 
     /* Return the original object. */

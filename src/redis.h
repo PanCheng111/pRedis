@@ -429,20 +429,20 @@ typedef struct redisObject {
      * @author: cheng pan
      * @date: 2018.9.18
      */
-    unsigned size:REDIS_ROBJ_SIZE_BITS; 
+    // unsigned size:REDIS_ROBJ_SIZE_BITS;  // 使用统一的dict来维护每个obj的size，这样在key被evict之后，还是可以得知每个key占用的内存大小
     /**
      * 记录对象所属的penalty class
      * @author: cheng pan
      * @date: 2018.10.16
      */
-    unsigned pclass:REDIS_ROBJ_PCLASS_BITS;
+    // unsigned pclass:REDIS_ROBJ_PCLASS_BITS; // 使用统一的dict来维护每个obj的penaly class，这样在key被evict之后，还是可以得知每个key占用的内存大小。
 
     /**
      * 为了统计访问的Reuse Time Histogram (RTH)， 需要记录每个obj上一次访问的时间戳
      * @author: cheng pan
      * @date: 2018.10.20
      */
-    unsigned last_access_time;
+    // unsigned last_access_time;
 
 
 } robj;
@@ -494,6 +494,13 @@ typedef struct redisDb {
 
     // 键的过期时间，字典的键为键，字典的值为过期事件 UNIX 时间戳
     dict *expires;              /* Timeout of keys with a timeout set */
+
+    /**
+     * 增加一个字典维护数据库中，每个key占用的value的字节大小，同时维护这个key所属的penalty class id
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    dict *size_pcid; 
 
     /**
      * 增加对key miss之后，miss time和miss penalty的追踪
@@ -1719,7 +1726,7 @@ void freeHashObject(robj *o);
  * @author: cheng pan
  * @date: 2018.9.19
  */
-void calcObjectSize(robj *o);
+unsigned int calcObjectSize(robj *o);
 
 robj *createObject(int type, void *ptr);
 robj *createStringObject(char *ptr, size_t len);

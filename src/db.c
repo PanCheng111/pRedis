@@ -113,8 +113,7 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
          * @date: 2018.10.21
          */
         //int rt = db->access_cnt - ((robj *)val)->last_access_time;
-        calcObjectSize((robj *)val);
-        db->before_access_size = ((robj *)val)->size;
+        db->before_access_size = calcObjectSize((robj *)val);
         db->accessed_obj = (robj *)val;
     }
     // 返回值
@@ -155,9 +154,8 @@ robj *lookupKeyWrite(redisDb *db, robj *key) {
          * @date: 2018.10.21
          */
         //int rt = db->access_cnt - ((robj *)val)->last_access_time;
-        db->last_access_time = ((robj *)val)->last_access_time;
-        calcObjectSize((robj *)val);
-        db->before_access_size = ((robj *)val)->size;
+        //db->last_access_time = ((robj *)val)->last_access_time;
+        db->before_access_size = calcObjectSize((robj *)val);
         db->accessed_obj = (robj *)val;
     }
     return val;
@@ -198,6 +196,30 @@ robj *lookupKeyWriteOrReply(redisClient *c, robj *key, robj *reply) {
     return o;
 }
 
+/**
+ * 设置value占用的字节数
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+void setValueSize(redisDb *db, robj *key, unsigned size) {
+    dictEntry *entry;
+    sds copy = sdsdup(key->ptr);
+    entry = dictReplaceRaw(db->size_pcid, copy);
+    dictSetUnsigned32LowVal(entry, size);
+}
+
+/**
+ * 查询value占用的字节数
+ * @author: cheng pan
+ * @date: 2018.10.21
+ */
+unsigned int getValueSize(redisDb *db, robj *key, unsigned size) {
+    dictEntry *entry;
+    entry = dictFind(db->size_pcid, key->ptr);
+    return dictGetUnsigned32LowVal(entry);
+}
+
+
 /* Add the key to the DB. It's up to the caller to increment the reference
  * counter of the value if needed.
  *
@@ -220,6 +242,13 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
     // 如果键已经存在，那么停止
     redisAssertWithInfo(NULL,key,retval == REDIS_OK);
 
+    /**
+     * 在此时将value obj的size记录在db->size_pcid中
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    setValueSize(db, key, calcObjectSize(val));
+    
     // 如果开启了集群模式，那么将键保存到槽里面
     if (server.cluster_enabled) slotToKeyAdd(key);
  }
@@ -247,6 +276,12 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
 
     // 覆写旧值
     dictReplace(db->dict, key->ptr, val);
+    /**
+     * 在此时将value obj的size记录在db->size_pcid中
+     * @author: cheng pan
+     * @date: 2018.10.21
+     */
+    setValueSize(db, key, calcObjectSize(val));    
 }
 
 /* High level Set operation. This function can be used in order to set
@@ -955,30 +990,27 @@ void typeCommand(redisClient *c) {
  * @author: cheng pan
  * @date: 2018.10.17
  */
-void changePclassId(redisDb *db, robj *key, robj *o, int pclassID) {
-    dictEntry *kde, *de;
+void changePclassId(redisDb *db, robj *key, dictEntry *entry, int pclassID) {
+    dictEntry *de;
+    int ori_pcid = dictGetUnsigned32HighVal(entry);
+    unsigned ori_size = dictGetUnsigned32LowVal(entry) + calcObjectSize(key) + zmalloc_size(entry);
+
     // 如果需要修改的pclassID和原来的一样，则直接返回。
-    if (o->pclass == pclassID) return;
-    calcObjectSize(o);
-    if (o->pclass != 0) {
+    if (ori_pcid == pclassID) return;
+    if (ori_pcid != 0) {
         // 从原有的penalty class中删除
         //printf("before del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
-        dictDelete(db->penalty_classes[o->pclass], key->ptr);
-        db->pclass_mem_used[o->pclass] -= o->size;
+        dictDelete(db->penalty_classes[ori_pcid], key->ptr);
+        db->pclass_mem_used[ori_pcid] -= ori_size;
         //printf("after del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
     }
-    o->pclass = pclassID;
-    //printf("before add: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
-    /* Reuse the sds from the main dict in the penalty_classes dict */
-    // 取出键
-    kde = dictFind(db->dict, key->ptr);
-    redisAssertWithInfo(NULL, key, kde != NULL);
+    dictSetUnsigned32HighVal(entry, (unsigned) pclassID);
+
+    sds copy = sdsdup(key->ptr);
     // 根据键取出键的pclass id
-    de = dictReplaceRaw(db->penalty_classes[o->pclass], dictGetKey(kde));
-    db->pclass_mem_used[o->pclass] += o->size;
-    // 设置键的pclass id
-    // 这里是直接使用整数值来保存pclass id，不是用 INT 编码的 String 对象
-    dictSetSignedIntegerVal(de, pclassID);
+    de = dictReplaceRaw(db->penalty_classes[pclassID], copy);
+    dictSetSignedIntegerVal(de, 0);// 目前penalty class中还不需要存储value值，所以在这里设置0,只是为了避免编译warning
+    db->pclass_mem_used[pclassID] += ori_size;
     //printf("after add: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
 } 
 
@@ -996,8 +1028,7 @@ void kvsizeCommand(redisClient *c) {
     if (o == NULL) {
         sprintf(size, "none");
     } else {
-        calcObjectSize(o);
-        sprintf(size, "key: %u, value: %u", c->argv[1]->size, o->size);
+        sprintf(size, "key: %u, value: %u", calcObjectSize(c->argv[1]), calcObjectSize(o));
     }
     addReplyStatus(c,size);
 }
@@ -1028,12 +1059,14 @@ void mspenaltyCommand(redisClient *c) {
  * @date: 2018.10.16
  */ 
 void setpclassIdCommand(redisClient *c) {
-    robj *o;
+    //robj *o;
     char response[50];
+    dictEntry *entry;
 
-    o = lookupKeyRead(c->db,c->argv[1]);
+    //o = lookupKeyRead(c->db,c->argv[1]);
+    entry = dictFind(c->db->size_pcid, c->argv[1]->ptr);
 
-    if (o == NULL) {
+    if (entry == NULL) {
         sprintf(response, "Error, no such key");
     } else {
         long pclass, len;
@@ -1042,8 +1075,8 @@ void setpclassIdCommand(redisClient *c) {
         if (pclass < 0 || pclass >= REDIS_MAX_PENALTY_CLASS) {
             sprintf(response, "Error, please set penalty class between 0~%d", REDIS_MAX_PENALTY_CLASS - 1);
         } else {
-            changePclassId(c->db, c->argv[1], o, pclass);
-            sprintf(response, "OK, set the %s's pclass ID to %ld", (char *)c->argv[1]->ptr, pclass);
+            changePclassId(c->db, c->argv[1], entry, (unsigned) pclass);
+            sprintf(response, "OK, set the %s's pclass ID to %u", (char *)c->argv[1]->ptr, (unsigned) pclass);
         }
     }
     addReplyStatus(c, response);
@@ -1055,16 +1088,17 @@ void setpclassIdCommand(redisClient *c) {
  * @date: 2018.10.16
  */ 
 void getpclassIdCommand(redisClient *c) {
-    robj *o;
+    //robj *o;
     char response[50];
+    dictEntry *entry;
+    //o = lookupKeyRead(c->db,c->argv[1]);
+    entry = dictFind(c->db->size_pcid, c->argv[1]->ptr);
 
-    o = lookupKeyRead(c->db,c->argv[1]);
-
-    if (o == NULL) {
+    if (entry == NULL) {
         sprintf(response, "Error, no such key");
     } else {
-        long pclass = o->pclass;
-        sprintf(response, "%s's pclass ID = %ld", (char *)c->argv[1]->ptr, pclass);
+        unsigned int pclass = dictGetUnsigned32HighVal(entry);
+        sprintf(response, "%s's pclass ID = %u", (char *)c->argv[1]->ptr, pclass);
     }
     addReplyStatus(c, response);
 }
