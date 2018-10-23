@@ -3,7 +3,11 @@
         "SConscript": "python",
         "adlist.h": "c",
         "redis.h": "c",
-        "cluster.h": "c"
+        "cluster.h": "c",
+        "slist": "cpp",
+        "dict.h": "c",
+        "rthrec.h": "c",
+        "*.ipp": "c"
     },
     "C_Cpp.errorSquiggles": "Disabled"
 }

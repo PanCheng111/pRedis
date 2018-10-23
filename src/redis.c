@@ -2327,12 +2327,17 @@ void initServer() {
             server.db[j].pclass_mem_alloc[i] = -1; // -1 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
             server.db[j].penalty_classes[i] = dictCreate(&keyptrDictType, NULL); //维护penalty class时， key使用dict中的，不造成浪费
-            /**
-             * 在db中增加reuse time采样的支持，维护当前采样的key的访问时间
-             * @author: cheng pan
-             * @date: 2018.10.21
-             */
-            server.db[j].reuse_time_sample[j] = dictCreate(&missDictType,NULL);
+        }
+        /**
+         * 在db中增加reuse time采样的支持，维护当前采样的key的访问时间，同时对于每个penalty class，维护一个rth record数据结构
+         * @author: cheng pan
+         * @date: 2018.10.22
+         */
+        server.db[j].reuse_time_sample = dictCreate(&missDictType,NULL);
+        for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
+            server.db[j].rth_rec[i] = (rthRec *)zmalloc(sizeof(struct rthRec));
+            rthClear(server.db[j].rth_rec[i]);
+            server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
         }
 
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
@@ -2645,6 +2650,66 @@ void forceCommandPropagation(redisClient *c, int flags) {
     if (flags & REDIS_PROPAGATE_AOF) c->flags |= REDIS_FORCE_AOF;
 }
 
+/**
+ * 辅助函数：使用malloc创建一个二维int数组
+ * N为行数，M为列数，init为数组的初始值
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+int **createIntMatrix(int N, int M, int init) {
+    int **matrix;
+    matrix = (int **)zmalloc(sizeof(int *) * N);
+    for (int i = 0; i < N; i++)
+        matrix[i] = (int *)zmalloc(sizeof(int) * M);
+    for (int i = 0; i < N; i++) 
+        for (int j = 0; j < M; j++)
+            matrix[i][j] = init;
+    return matrix;
+} 
+
+/**
+ * 辅助函数：使用malloc创建一个二维double数组
+ * N为行数，M为列数，init为数组的初始值
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+double **createDoubleMatrix(int N, int M, double init) {
+    double **matrix;
+    matrix = (double **)zmalloc(sizeof(double *) * N);
+    for (int i = 0; i < N; i++)
+        matrix[i] = (double *)zmalloc(sizeof(double) * M);
+    for (int i = 0; i < N; i++) 
+        for (int j = 0; j < M; j++)
+            matrix[i][j] = init;
+    return matrix;
+} 
+
+
+/**
+ * 辅助函数： 释放由malloc创建的二维int数组matrix
+ * N为函数，M为列数
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+void freeIntMatrix(int **matrix, int N, int M) {
+    for (int i = 0; i < N; i++) 
+        zfree(matrix[i]);
+    zfree(matrix);
+} 
+
+/**
+ * 辅助函数： 释放由malloc创建的二维double数组matrix
+ * N为函数，M为列数
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+void freeDoubleMatrix(double **matrix, int N, int M) {
+    for (int i = 0; i < N; i++) 
+        zfree(matrix[i]);
+    zfree(matrix);
+} 
+
+
 /* Call() is the core of Redis execution of a command */
 // 调用命令的实现函数，执行命令
 void call(redisClient *c, int flags) {
@@ -2672,11 +2737,13 @@ void call(redisClient *c, int flags) {
     /**
      * 为执行命令前的各种信息初始化
      * @author: cheng pan
-     * @date: 2018.10.21
+     * @date: 2018.10.22
      */ 
-    // c->db->accessed_obj = NULL;
-    // c->db->before_access_size = -1;
-    // c->db->last_access_time = -1;
+    //c->db->is_setback = 0; //设置set-back为false
+    unsigned int size_before_proc = 0;
+    unsigned int size_after_proc = 0;
+    long long last_access_time = 0;
+    if (c->cmd->firstkey == 1) size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
 
     // 计算命令开始执行的时间
     start = ustime();
@@ -2690,15 +2757,91 @@ void call(redisClient *c, int flags) {
     /**
      * 在命令执行后，统计各种信息，比如RTH
      * @author: cheng pan
-     * @date: 2018.10.21
+     * @date: 2018.10.22
      */
-    // robj *o = c->db->accessed_obj;
-    // if (o != NULL) {
-    //     int rt = c->db->access_cnt - c->db->last_access_time;
-    // } 
-    // else {
+    if (c->cmd->firstkey == 1) {
+        size_after_proc = getKeyValueSize(c->db, c->argv[1]);
+        last_access_time = getLastAccessTime(c->db, c->argv[1]);
+        // 注意， 如果该key没有被加入到redis中，则pclass会返回-1。此时相当于cold miss，我们不做任何处理直到该key被setback回来。
+        int pclass = getPenaltyClass(c->db, c->argv[1]); 
+        // 注意，如果该key还没有追踪到miss penalty， 返回-1。
+        long long mspenalty = getMissPenalty(c->db, c->argv[1]);
 
-    // }
+        long long cur_time;
+        if (c->flags & REDIS_CMD_READONLY) {
+            // GET 操作
+            if (size_after_proc == REDIS_KEYVALUE_SIZE_NULL /*0xFFFFFFFF*/) {
+                // 第一次读miss操作，此时还不知道该key-value的size
+                // 直到下一次set-back，才会知道该key的size 
+                // 这里直接忽略这个操作，（我们假定每个元素被加入redis，至少要经历一次cold miss），直到下一次set-back，将那次的写操作当作是这次的读操作。
+            }
+            else {
+                c->db->rth_rec[pclass]->tot_penalty += mspenalty;
+                cur_time = rthGet(c->db->rth_rec[pclass], c->argv[1], size_after_proc, last_access_time);
+                setLastAccessTime(c->db, c->argv[1], cur_time);
+            }
+        }
+        else if (c->flags & REDIS_CMD_WRITE) {
+            // UPDATE 操作
+            if (size_before_proc == REDIS_KEYVALUE_SIZE_NULL /*0xFFFFFFFF*/) { //写操作发现该key不存在，说明该操作是一个set-back操作，可以用来弥补之前的一个GET MISS操作
+                size_before_proc = 0; 
+                // 将该操作当作是一个GET操作来处理
+                c->db->rth_rec[pclass]->tot_penalty += mspenalty;
+                cur_time = rthGet(c->db->rth_rec[pclass], c->argv[1], size_after_proc, last_access_time);
+            }
+            else {
+                c->db->rth_rec[pclass]->tot_penalty += mspenalty;
+                cur_time = rthUpdate(c->db->rth_rec[pclass], c->argv[1], size_before_proc, size_after_proc, last_access_time);
+                setLastAccessTime(c->db, c->argv[1], cur_time);
+            }
+        }
+        c->db->access_cnt ++;
+    }
+
+    /**
+     * 在这里进行动态规划的调整，给每个penalty class分配具体多少空间
+     * @author: cheng pan
+     * @date: 2018.10.23
+     */ 
+    if (c->db->access_cnt == REDIS_DB_ADJUST_CNT) {
+        // 到达设置的进行调整的访问阈值，此处执行一次动态规划进行各个penalty class的大小
+        for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
+            rthCalcMRC(c->db->rth_rec[i], server.maxmemory, REDIS_MEM_ALLOC_GRAND);
+        // 每次动态规划的数组， 动态分配
+        int **bck = createIntMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.maxmemory / REDIS_MEM_ALLOC_GRAND + 1, -1); // 用来记录反向路径的数组，可以用来求方案
+        double **f = createDoubleMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.maxmemory / REDIS_MEM_ALLOC_GRAND + 1, 1e20); // 动态规划数组，用来求最小的miss penalty
+        f[0][0] = 0;
+        rthRec **rths = c->db->rth_rec;
+        for (int i = 1; i < REDIS_MAX_PENALTY_CLASS - 1; i++)
+            for (int j = 0; j <= server.maxmemory / REDIS_MEM_ALLOC_GRAND; j ++)
+                for (int k = 0; k <= j; k++) {
+                    double t = f[i - 1][k] + rths[i]->tot_penalty * rths[i]->mrc[j - k];
+                    if (t < f[i][j]) {
+                        f[i][j] = t;
+                        bck[i][j] = k;
+                    }
+                }
+        // 根据记录的逆向路径，求得各个penalty class的分配方案
+        for (int i = REDIS_MAX_PENALTY_CLASS - 1, j = server.maxmemory / REDIS_MEM_ALLOC_GRAND; i>0; i--) {
+            int t = bck[i][j];
+            c->db->pclass_mem_alloc[i] = (j - t) * REDIS_MEM_ALLOC_GRAND;
+            j = t;
+        }
+        // 这里释放进行动态规划的辅助数组，以防止内存泄露
+        freeIntMatrix(bck, REDIS_MAX_PENALTY_CLASS + 1, server.maxmemory / REDIS_MEM_ALLOC_GRAND + 1);
+        freeDoubleMatrix(f, REDIS_MAX_PENALTY_CLASS + 1, server.maxmemory / REDIS_MEM_ALLOC_GRAND + 1);
+
+        /**
+         * 调整完分配方案之后，需要完成的工作有：
+         * 1) 清空所有rth_rec中的统计信息，为下一phase的统计做准备；
+         * 2) 将db->current_penalty_class_turn改变一下，为了每个key的penalty class id可以在下一个阶段改变
+         * 3) 清空db->access_cnt
+         */
+        for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
+            rthClear(rths[i]);
+        c->db->current_penalty_class_turn ^= REDIS_PENALTY_CLASS_TURNS; // 更换下一个阶段的turn标志，(1<<10) <==> (1<<11)
+        c->db->access_cnt = 0;
+    }
 
     /* When EVAL is called loading the AOF we don't want commands called
      * from Lua to go into the slowlog or to populate statistics. */

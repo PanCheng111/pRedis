@@ -113,8 +113,8 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
          * @date: 2018.10.21
          */
         //int rt = db->access_cnt - ((robj *)val)->last_access_time;
-        db->before_access_size = calcObjectSize((robj *)val);
-        db->accessed_obj = (robj *)val;
+        //db->before_access_size = calcObjectSize((robj *)val);
+        //db->accessed_obj = (robj *)val;
     }
     // 返回值
     return val;
@@ -142,6 +142,13 @@ robj *lookupKeyWrite(redisDb *db, robj *key) {
         removeMissTime(db, key);
         // 设置该key的miss penalty为当前时间减去上次miss发生的时间
         setMissPenalty(db, key, mstime() - miss_time);
+        /**
+         * 此次操作为set-back操作，在统计RTH时，将该操作统计为GET
+         * @author: cheng pan
+         * @date: 2018.10.22
+         */
+        // db->is_setback = 1; 
+        // 此时我们使用另一种办法解决了这个问题，不使用is_setback标志了。ps: 2018.10.23
     }
 
     // 查找并返回 key 的值对象
@@ -155,8 +162,8 @@ robj *lookupKeyWrite(redisDb *db, robj *key) {
          */
         //int rt = db->access_cnt - ((robj *)val)->last_access_time;
         //db->last_access_time = ((robj *)val)->last_access_time;
-        db->before_access_size = calcObjectSize((robj *)val);
-        db->accessed_obj = (robj *)val;
+        //db->before_access_size = calcObjectSize((robj *)val);
+        //db->accessed_obj = (robj *)val;
     }
     return val;
 }
@@ -197,11 +204,40 @@ robj *lookupKeyWriteOrReply(redisClient *c, robj *key, robj *reply) {
 }
 
 /**
+ * 检查在这个时间点，是否可以更改某个key的penalty class
+ * 更改的原则是，在要给time window / phase中，只能修改一次penalty class id，但是可以多次修改某个key的penalty time
+ * @author: cheng pan
+ * @date: 2018.10.22
+ */ 
+int checkSetPenaltyClassTurn(redisDb *db, robj *key) {
+    unsigned int pcid = 0;
+    dictEntry *entry = dictFind(db->size_pcid, key->ptr);
+    if (entry == NULL) {
+        sds copy = sdsdup(key->ptr);
+        entry = dictReplaceRaw(db->size_pcid, copy); // 当且仅当这个key还没有被设置到size_pcid中——即第一个cold miss之后还没有被set-back回来。
+    }
+    else pcid = dictGetUnsigned32HighVal(entry); 
+
+    // printf("check set penalty class\n");
+    // printf("pcid = %d, db->curr=%d \n", pcid, db->current_penalty_class_turn);
+    if (((pcid & db->current_penalty_class_turn) & (~REDIS_PENALTY_CLASS_MASK)) == 0) { // 这里需要屏蔽掉低位部分的真实pcid，只看高位部分的turn是否存在
+        pcid |= db->current_penalty_class_turn;  // 将当前turn设置到pcid中，在当前phase中，就不会再修改pcid的值
+        // 同时还需要将另一个位置上的1清除掉，为了下一轮可以更改pcid
+        pcid = pcid & (~(db->current_penalty_class_turn ^ REDIS_PENALTY_CLASS_TURNS));
+        dictSetUnsigned32HighVal(entry, pcid);
+        return 1;
+    }
+    else {
+        return 0; // 此时说明在当前阶段中，该key已经被设置过一次penalty class了，不能再设置一次。
+    }
+}
+
+/**
  * 设置value占用的字节数
  * @author: cheng pan
  * @date: 2018.10.21
  */
-void setValueSize(redisDb *db, robj *key, unsigned size) {
+void setKeyValueSize(redisDb *db, robj *key, unsigned size) {
     dictEntry *entry;
     sds copy = sdsdup(key->ptr);
     entry = dictReplaceRaw(db->size_pcid, copy);
@@ -210,13 +246,56 @@ void setValueSize(redisDb *db, robj *key, unsigned size) {
 
 /**
  * 查询value占用的字节数
+ * 如果该key不存在，返回 REDIS_KEYVALUE_SIZE_NULL (0xFFFFFFFF)
  * @author: cheng pan
  * @date: 2018.10.21
  */
-unsigned int getValueSize(redisDb *db, robj *key, unsigned size) {
+unsigned int getKeyValueSize(redisDb *db, robj *key) {
     dictEntry *entry;
     entry = dictFind(db->size_pcid, key->ptr);
+    if (entry == NULL) return REDIS_KEYVALUE_SIZE_NULL;
     return dictGetUnsigned32LowVal(entry);
+}
+
+/**
+ * 查询一个key所属的penalty class
+ * @author: cheng pan
+ * @date: 2018.10.22
+ */
+int getPenaltyClass(redisDb *db, robj *key) {
+    dictEntry *entry;
+    //o = lookupKeyRead(c->db,c->argv[1]);
+    entry = dictFind(db->size_pcid, key->ptr);
+    if (entry == NULL) {
+        return -1;
+    } else {
+        unsigned int pclass = dictGetUnsigned32HighVal(entry);
+        return pclass & REDIS_PENALTY_CLASS_MASK;
+    }    
+} 
+
+/**
+ * 增加获取某个key，所属的某个penalty class中，最后一次访问时间
+ * 如果没有查询到，返回0
+ * @author: cheng pan
+ * @date: 201.10.23
+ */
+long long getLastAccessTime(redisDb *db, robj *key) {
+    dictEntry *entry = dictFind(db->reuse_time_sample, key->ptr);
+    if (entry == NULL) return 0;
+    long long ret = dictGetSignedIntegerVal(entry);
+    return ret;
+}
+
+/**
+ * 增加设置某个key，所属的某个penalty class中，最后一次访问时间
+ * @author: cheng pan
+ * @date: 201.10.23
+ */
+void setLastAccessTime(redisDb *db, robj *key, long long last_access_time) {
+    sds copy = sdsdup(key->ptr);
+    dictEntry *entry = dictReplaceRaw(db->reuse_time_sample, copy);
+    dictSetSignedIntegerVal(entry, last_access_time);
 }
 
 
@@ -247,7 +326,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
      * @author: cheng pan
      * @date: 2018.10.21
      */
-    setValueSize(db, key, calcObjectSize(val));
+    setKeyValueSize(db, key, calcObjectSize(key) + calcObjectSize(val) + 32); // 32 bytes are the size of struct dictEntry
     
     // 如果开启了集群模式，那么将键保存到槽里面
     if (server.cluster_enabled) slotToKeyAdd(key);
@@ -281,7 +360,7 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
      * @author: cheng pan
      * @date: 2018.10.21
      */
-    setValueSize(db, key, calcObjectSize(val));    
+    setKeyValueSize(db, key, calcObjectSize(key) + calcObjectSize(val) + 32); // 32 bytes are the size of struct dictEntry
 }
 
 /* High level Set operation. This function can be used in order to set
@@ -379,6 +458,13 @@ int dbDelete(redisDb *db, robj *key) {
      * the key, because it is shared with the main dictionary. */
     // 删除键的过期时间
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+
+    /**
+     * 对于删除操作，更新key-value的size为0
+     * @author: cheng pan
+     * @date: 2018.10.22
+     */ 
+    setKeyValueSize(db, key, 0);
 
     // 删除键值对
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
@@ -986,14 +1072,15 @@ void typeCommand(redisClient *c) {
 }
 
 /**
- * 改变一个robj对象所属的penalty class id
+ * 改变一个key所属的penalty class id
  * @author: cheng pan
- * @date: 2018.10.17
+ * @date: 2018.10.22
  */
-void changePclassId(redisDb *db, robj *key, dictEntry *entry, int pclassID) {
+void changePenaltyClassId(redisDb *db, robj *key, int pclassID) {
     dictEntry *de;
-    int ori_pcid = dictGetUnsigned32HighVal(entry);
-    unsigned ori_size = dictGetUnsigned32LowVal(entry) + calcObjectSize(key) + zmalloc_size(entry);
+    dictEntry *entry = dictFind(db->size_pcid, key->ptr);
+    int ori_pcid = dictGetUnsigned32HighVal(entry) & REDIS_PENALTY_CLASS_MASK; // 这里需要取出末尾部分，不能将高位的turn也放置进去
+    unsigned ori_size = dictGetUnsigned32LowVal(entry);
 
     // 如果需要修改的pclassID和原来的一样，则直接返回。
     if (ori_pcid == pclassID) return;
@@ -1004,7 +1091,7 @@ void changePclassId(redisDb *db, robj *key, dictEntry *entry, int pclassID) {
         db->pclass_mem_used[ori_pcid] -= ori_size;
         //printf("after del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
     }
-    dictSetUnsigned32HighVal(entry, (unsigned) pclassID);
+    dictSetUnsigned32HighVal(entry, (unsigned) pclassID | db->current_penalty_class_turn);
 
     sds copy = sdsdup(key->ptr);
     // 根据键取出键的pclass id
@@ -1060,7 +1147,7 @@ void mspenaltyCommand(redisClient *c) {
  */ 
 void setpclassIdCommand(redisClient *c) {
     //robj *o;
-    char response[50];
+    char response[70];
     dictEntry *entry;
 
     //o = lookupKeyRead(c->db,c->argv[1]);
@@ -1075,8 +1162,13 @@ void setpclassIdCommand(redisClient *c) {
         if (pclass < 0 || pclass >= REDIS_MAX_PENALTY_CLASS) {
             sprintf(response, "Error, please set penalty class between 0~%d", REDIS_MAX_PENALTY_CLASS - 1);
         } else {
-            changePclassId(c->db, c->argv[1], entry, (unsigned) pclass);
-            sprintf(response, "OK, set the %s's pclass ID to %u", (char *)c->argv[1]->ptr, (unsigned) pclass);
+            if (checkSetPenaltyClassTurn(c->db, c->argv[1]) == 1) {
+                changePenaltyClassId(c->db, c->argv[1], (unsigned) pclass);
+                sprintf(response, "OK, set the %s's pclass ID to %u", (char *)c->argv[1]->ptr, (unsigned) pclass);
+            }
+            else {
+                sprintf(response, "Error, please set penalty class in next phase!");
+            }
         }
     }
     addReplyStatus(c, response);
@@ -1090,14 +1182,11 @@ void setpclassIdCommand(redisClient *c) {
 void getpclassIdCommand(redisClient *c) {
     //robj *o;
     char response[50];
-    dictEntry *entry;
-    //o = lookupKeyRead(c->db,c->argv[1]);
-    entry = dictFind(c->db->size_pcid, c->argv[1]->ptr);
+    int pclass = getPenaltyClass(c->db, c->argv[1]);
 
-    if (entry == NULL) {
+    if (pclass == -1) {
         sprintf(response, "Error, no such key");
     } else {
-        unsigned int pclass = dictGetUnsigned32HighVal(entry);
         sprintf(response, "%s's pclass ID = %u", (char *)c->argv[1]->ptr, pclass);
     }
     addReplyStatus(c, response);
@@ -1685,6 +1774,31 @@ void persistCommand(redisClient *c) {
  * Miss Time API
  *----------------------------------------------------------------------------*/
 
+/**
+ * 判别一个miss time所属的penalty class
+ * penalty time的单位是ms
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */ 
+int judgePenaltyClass(long long penalty_time) {
+    if (penalty_time <= 1) return 1;
+    if (penalty_time <= 2) return 2;
+    if (penalty_time <= 4) return 3;
+    if (penalty_time <= 8) return 4;
+    if (penalty_time <= 16) return 5;
+    if (penalty_time <= 32) return 6;
+    if (penalty_time <= 64) return 7;
+    if (penalty_time <= 128) return 8;
+    if (penalty_time <= 256) return 9;
+    if (penalty_time <= 512) return 10;
+    if (penalty_time <= 1024) return 11;
+    if (penalty_time <= 2048) return 12;
+    if (penalty_time <= 4096) return 13;
+    if (penalty_time <= 8192) return 14;
+    if (penalty_time <= 16384) return 15;
+    return REDIS_MAX_PENALTY_CLASS - 1; // 所有超过范围的，都被归到最大的一类中去
+}
+
 /*
  * 移除键 key 的miss time时间
  * @author: cheng pan
@@ -1721,7 +1835,7 @@ void setMissTime(redisDb *db, robj *key, long long when) {
     // printf("add to dict: miss_times, addr = %lx, key = %s\n", de, dictGetKey(de));
     // 设置键的miss time
     // 这里是直接使用整数值来保存过期时间，不是用 INT 编码的 String 对象
-    dictSetSignedIntegerVal(de, when);
+    dictSetSignedIntegerVal(de, when); 
 }
 
 /* Return the expire time of the specified key, or -1 if no expire
@@ -1739,7 +1853,7 @@ long long getMissTime(redisDb *db, robj *key) {
     // 如果过期时间不存在，那么直接返回
     if (dictSize(db->miss_times) == 0 ||
        (de = dictFind(db->miss_times, key->ptr)) == NULL) return -1;
-    printf("miss time = %ld\n", dictGetSignedIntegerVal(de));
+    // printf("miss time = %ld\n", dictGetSignedIntegerVal(de));
     // 返回miss time
     return dictGetSignedIntegerVal(de);
 }
@@ -1768,19 +1882,25 @@ int removeMissPenalty(redisDb *db, robj *key) {
  * @date: 2018.10.15
  */
 void setMissPenalty(redisDb *db, robj *key, long long penalty) {
-    dictEntry *de;
-    /* Reuse the sds from the main dict in the miss penalty dict */
-    // 取出键，可以复用原有的dict中key
-    // kde = dictFind(db->dict, key->ptr);
-    // redisAssertWithInfo(NULL, key, kde != NULL);
-    // 根据键取出键的miss penalty
-    // de = dictReplaceRaw(db->miss_penalties, dictGetKey(kde));
+    dictEntry *de = dictFind(db->miss_penalties, key->ptr);
+    if (de != NULL) penalty = (penalty + dictGetSignedIntegerVal(de)) / 2; // 获得之前的miss time, 使用1/2衰减法则； 如果是首次，则直接复制    
     // 复制键
     sds copy = sdsdup(key->ptr);
     de = dictReplaceRaw(db->miss_penalties, copy); 
     // 设置键的miss penalty
     // 这里是直接使用整数值来保存过期时间，不是用 INT 编码的 String 对象
     dictSetSignedIntegerVal(de, penalty);
+
+    /**
+     * 检查当前是否可以设置该key的penalty class
+     * 这里需要保证，在一个时间窗口内（time window / phase），一个key的penalty class只被设置一次。
+     * @author: cheng pan
+     * @date: 2018.10.22
+     */ 
+    if (checkSetPenaltyClassTurn(db, key) == 1) {
+        changePenaltyClassId(db, key, judgePenaltyClass(penalty));
+    }
+
 }
 
 /* Return the expire time of the specified key, or -1 if no expire
@@ -1793,15 +1913,9 @@ void setMissPenalty(redisDb *db, robj *key, long long penalty) {
  */
 long long getMissPenalty(redisDb *db, robj *key) {
     dictEntry *de;
-    /* No expire? return ASAP */
-    // 获取键的过期时间
-    // 如果过期时间不存在，那么直接返回
+    // 如果该key还没有被记录过miss penalty，则直接返回-1
     if (dictSize(db->miss_penalties) == 0 ||
        (de = dictFind(db->miss_penalties, key->ptr)) == NULL) return -1;
-
-    /* The entry was found in the expire dict, this means it should also
-     * be present in the main dict (safety check). */
-    redisAssertWithInfo(NULL, key, dictFind(db->dict, key->ptr) != NULL);
     // 返回miss penalty
     return dictGetSignedIntegerVal(de);
 }

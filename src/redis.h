@@ -387,6 +387,7 @@
  * Data types
  *----------------------------------------------------------------------------*/
 
+
 typedef long long mstime_t; /* millisecond time type. */
 
 /* A redis object, that is a type able to hold a string / list / set */
@@ -447,6 +448,30 @@ typedef struct redisObject {
 
 } robj;
 
+/**
+ * 增加rth记录的维护，同时计算MRC曲线
+ * @author: cheng pan
+ * @date: 2018.10.22
+ */
+#define rth_domain 256 // compression ratio
+#define rth_MAXS  (1024+3)
+#define rth_RTD_LENGTH  (10000+3)
+
+typedef struct rthRec {
+    int rtd[rth_RTD_LENGTH]; // reuse time distribution, rtd[0] for cold miss
+    int rtd_del[rth_RTD_LENGTH];
+    int read_rtd[rth_RTD_LENGTH];
+
+    double mrc[rth_MAXS];
+    long long n; // 用来记录访问的字节总数
+    long long tot_penalty; // 用来记录该类中所有访问的penalty总和
+} rthRec;
+
+long long rthGet(rthRec *rth, robj *key, unsigned size, long long last_access_time);
+long long rthUpdate(rthRec *rth, robj *key, unsigned ori_size, unsigned cur_size, long long last_access_time);
+void rthClear(rthRec *rth);
+void rthCalcMRC(rthRec *rth, unsigned long long tot_memory, unsigned int PGAP);
+
 /* Macro used to obtain the current LRU clock.
  * If the current resolution is lower than the frequency we refresh the
  * LRU clock (as it should be in production servers) we return the
@@ -483,6 +508,26 @@ struct evictionPoolEntry {
  * @date: 2018.10.16
  */
 #define REDIS_MAX_PENALTY_CLASS (1 << REDIS_ROBJ_PCLASS_BITS)
+#define REDIS_PENALTY_CLASS_MASK ((1 << REDIS_ROBJ_PCLASS_BITS) - 1)
+/**
+ * 定义一个redis DB中进行了多少个访问之后就进行动态规划重新划分各个penalty class的内存
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+#define REDIS_DB_ADJUST_CNT 1000000 // 默认设置100w次访问之后，就进行一次调整操作
+/**
+ * 定义在进行各个penalty class进行分配的时候，划分的最小粒度是多少
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+#define REDIS_MEM_ALLOC_GRAND (1024 * 1024) // 默认 1MB 为分配的单位
+
+/**
+ * 定义
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */
+#define REDIS_PENALTY_CLASS_TURNS ((1 << 10) | (1 << 11)) 
 
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
@@ -522,9 +567,9 @@ typedef struct redisDb {
     /**
      * 用于reuse time的采样，维护每个key上一次访问时间
      * @author: cheng pan
-     * @date: 2018.10.21
+     * @date: 2018.10.23
      */
-    dict *reuse_time_sample[REDIS_MAX_PENALTY_CLASS]; // 不能和dict公用key的空间，因为dict中的key可能被evict，释放掉之后，不能访问key了。
+    dict *reuse_time_sample; // 不能和dict公用key的空间，因为dict中的key可能被evict，释放掉之后，不能访问key了。
 
     // 正处于阻塞状态的键
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
@@ -545,16 +590,34 @@ typedef struct redisDb {
      * @author: cheng pan
      * @date: 2018.10.21
      */
-    int access_cnt[REDIS_MAX_PENALTY_CLASS];
+    //int access_cnt[REDIS_MAX_PENALTY_CLASS];
     //int last_access_time; // 这里的上一次访问时间，会在每次访问数据库时（processCommand, call()），在db.c中进行设置。
+    /**
+     * 为了计算RTH。需要维护不同penalty class中的rth，以及访问的miss penalty
+     * @author: cheng pan
+     * @date: 2018.10.22
+     */
+    rthRec *rth_rec[REDIS_MAX_PENALTY_CLASS]; 
 
     /**
      * 为了计算MRC，需要记录每次GET或者UPDATE或者DEL多少字节
      * @author: cheng pan
      * @date: 2018.10.21
      */
-    int before_access_size; //操作发生前，该obj占用的字节数
-    robj *accessed_obj; //记录操作的对象，可以用来获得after_access_size; ps: del 操作会删除obj，所以需要特殊判断。
+    //int is_setback;
+
+    /**
+     * 记录每个db中在一个节点中处理过的指令个数，在到达一个给定的阈值之后，使用动态规划进行调整
+     * @author: cheng pan
+     * @date: 2018.10.23
+     */
+    int access_cnt;  
+    /**
+     * 用来决定当前数据库中应该采集那个阶段的penalty class id
+     * @author: cheng pan
+     * @date: 2018.10.23
+     */
+    int current_penalty_class_turn; // 取值为 (1 << 10 or 1 << 11)
 
     // 数据库的键的平均 TTL ，统计信息
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -1955,6 +2018,41 @@ int removeMissTime(redisDb *db, robj *key);
 void setMissPenalty(redisDb *db, robj *key, long long when);
 long long getMissPenalty(redisDb *db, robj *key);
 int removeMissPenalty(redisDb *db, robj *key);
+
+/**
+ * 定义查询key-value size失败时的返回值
+ * @author: cheng pan
+ * @date: 2018.10.23
+ */ 
+#define REDIS_KEYVALUE_SIZE_NULL 0xFFFFFFFF
+
+/**
+ * 增加获取key-value占用内存大小的接口
+ * 其中，key-value size包括：key size + value size + dictEntry size
+ * 如果查询时发现该key不存在，直接返回REDIS_KEYVALUE_SIZE_NULL
+ * @author: cheng pan
+ * @date: 2018.10.22
+ */
+unsigned int getKeyValueSize(redisDb *db, robj *key);
+/**
+ * 增加获取key所属penalty class id
+ * 如果该key不存在，返回-1
+ * @author: cheng pan
+ * @date: 2018.10.22
+ */ 
+int getPenaltyClass(redisDb *db, robj *key);
+/**
+ * 增加获取某个key，所属的某个penalty class中，最后一次访问时间
+ * @author: cheng pan
+ * @date: 201.10.23
+ */
+long long getLastAccessTime(redisDb *db, robj *key);
+/**
+ * 增加设置某个key，所属的某个penalty class中，最后一次访问时间
+ * @author: cheng pan
+ * @date: 201.10.23
+ */
+void setLastAccessTime(redisDb *db, robj *key, long long last_access_time);
 
 robj *lookupKey(redisDb *db, robj *key);
 robj *lookupKeyRead(redisDb *db, robj *key);
