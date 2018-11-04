@@ -717,6 +717,12 @@ void hsetCommand(redisClient *c) {
 
     // 设置 field 和 value 到 hash
     update = hashTypeSet(o,c->argv[2],c->argv[3]);
+    /**
+     * 此处需要更新对象的占用字节大小
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */
+    setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
 
     // 返回状态：显示 field-value 对是新添加还是更新
     addReply(c, update ? shared.czero : shared.cone);
@@ -751,7 +757,12 @@ void hsetnxCommand(redisClient *c) {
         hashTypeTryObjectEncoding(o,&c->argv[2], &c->argv[3]);
         // 设置
         hashTypeSet(o,c->argv[2],c->argv[3]);
-
+        /**
+         * 此处需要更新对象的占用字节大小
+         * @author: cheng pan
+         * @date: 2018.11.2
+         */
+        setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
         // 回复 1 ，表示设置成功
         addReply(c, shared.cone);
 
@@ -789,6 +800,13 @@ void hmsetCommand(redisClient *c) {
         // 设置
         hashTypeSet(o,c->argv[i],c->argv[i+1]);
     }
+    
+    /**
+     * 此处需要更新对象的占用字节大小
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */
+    setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
 
     // 向客户端发送回复
     addReply(c, shared.ok);
@@ -845,6 +863,13 @@ void hincrbyCommand(redisClient *c) {
     hashTypeSet(o,c->argv[2],new);
     decrRefCount(new);
 
+    /**
+     * 此处需要更新对象的占用字节大小
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */
+    setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
+
     // 将计算结果用作回复
     addReplyLongLong(c,value);
 
@@ -891,6 +916,13 @@ void hincrbyfloatCommand(redisClient *c) {
     // 关联键和新的值对象，如果已经有对象存在，那么用新对象替换它
     hashTypeSet(o,c->argv[2],new);
 
+    /**
+     * 此处需要更新对象的占用字节大小
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */
+    setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
+    
     // 返回新的值对象作为回复
     addReplyBulk(c,new);
 
@@ -1017,6 +1049,14 @@ void hdelCommand(redisClient *c) {
             }
         }
     }
+
+    /**
+     * 此处需要更新对象的占用字节大小
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */
+    if (hashTypeLength(o) > 0) // 判断这个hash对象是否还有数据，如果没有数据，在dbDelete中已经更新了key value size了。
+        setKeyValueSize(c->db, c->argv[1], calcObjectSize(c->argv[1]) + calcObjectSize(o) + 32); 
 
     // 只要有至少一个域值对被修改了，那么执行以下代码
     if (deleted) {

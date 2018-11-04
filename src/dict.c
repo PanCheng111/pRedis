@@ -530,7 +530,7 @@ int dictAdd(dict *d, void *key, void *val)
      * @author: cheng pan
      * @date: 2018.10.09
      */
-    d->size += zmalloc_size(entry) + dictGetEntryKeySize(d, entry) + dictGetEntryValueSize(d, entry);
+    d->size += dictGetEntryValueSize(d, entry);
     // 添加成功
     return DICT_OK;
 }
@@ -585,6 +585,14 @@ dictEntry *dictAddRaw(dict *d, void *key)
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
     // 为新节点分配空间
     entry = zmalloc(sizeof(*entry));
+
+    /**
+     * 注意，此处需要对dict的size进行维护，但是此时的val还没有设置，需要调用这进行维护
+     * @author: cheng pan
+     * @date: 2018.11.2
+     */ 
+    d->size += zmalloc_size(entry);
+
     // 将新节点插入到链表表头
     entry->next = ht->table[index];
     ht->table[index] = entry;
@@ -595,6 +603,13 @@ dictEntry *dictAddRaw(dict *d, void *key)
     // 设置新节点的键
     // T = O(1)
     dictSetKey(d, entry, key);
+
+    /**
+     * 维护key占用的size
+     * @author: cheng pan
+     * @date: 2018.11.4
+     */ 
+    d->size += dictGetEntryKeySize(d, entry);
 
     return entry;
 }
@@ -1597,11 +1612,11 @@ void dictEmpty(dict *d, void(callback)(void*)) {
     d->iterators = 0;
 
     /**
-     * 增加对字节size的维护
+     * 增加对字节size的维护，清空dict
      * @author: cheng pan
      * @date: 2018.10.09
      */
-    d->size = 0; 
+    d->size = zmalloc_size(d); 
 }
 
 /*

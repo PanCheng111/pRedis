@@ -454,7 +454,7 @@ typedef struct redisObject {
  * @date: 2018.10.22
  */
 #define rth_domain 256 // compression ratio
-#define rth_MAXS  (1024+3)
+//#define rth_MAXS  (1024+3)
 #define rth_RTD_LENGTH  (10000+3)
 
 typedef struct rthRec {
@@ -462,7 +462,7 @@ typedef struct rthRec {
     int rtd_del[rth_RTD_LENGTH];
     int read_rtd[rth_RTD_LENGTH];
 
-    double mrc[rth_MAXS];
+    double *mrc;
     long long n; // 用来记录访问的字节总数
     long long tot_penalty; // 用来记录该类中所有访问的penalty总和
 } rthRec;
@@ -470,7 +470,7 @@ typedef struct rthRec {
 long long rthGet(rthRec *rth, robj *key, unsigned size, long long last_access_time);
 long long rthUpdate(rthRec *rth, robj *key, unsigned ori_size, unsigned cur_size, long long last_access_time);
 void rthClear(rthRec *rth);
-void rthCalcMRC(rthRec *rth, unsigned long long tot_memory, unsigned int PGAP);
+void rthCalcMRC(rthRec *rth, long long tot_memory, unsigned int PGAP);
 
 /* Macro used to obtain the current LRU clock.
  * If the current resolution is lower than the frequency we refresh the
@@ -514,21 +514,30 @@ struct evictionPoolEntry {
  * @author: cheng pan
  * @date: 2018.10.23
  */
-#define REDIS_DB_ADJUST_CNT 1000000 // 默认设置100w次访问之后，就进行一次调整操作
+//#define REDIS_DB_ADJUST_CNT 1000000 // 默认设置100w次访问之后，就进行一次调整操作
+#define REDIS_DB_ADJUST_CNT 5000 // 默认设置1000次访问之后，就进行一次调整操作
+
 /**
  * 定义在进行各个penalty class进行分配的时候，划分的最小粒度是多少
  * @author: cheng pan
  * @date: 2018.10.23
  */
-#define REDIS_MEM_ALLOC_GRAND (1024 * 1024) // 默认 1MB 为分配的单位
+//#define REDIS_MEM_ALLOC_GRAND (1024 * 1024) // 默认 1MB 为分配的单位
+#define REDIS_MEM_ALLOC_GRAND (1024) // 默认 1KB 为分配的单位
 
 /**
- * 定义
+ * 定义设置penalty class的掩码
  * @author: cheng pan
  * @date: 2018.10.23
  */
 #define REDIS_PENALTY_CLASS_TURNS ((1 << 10) | (1 << 11)) 
 
+/**
+ * 定义在动态规划过程中的允许误差值
+ * @author: cheng pan
+ * @date: 2018.11.4
+ */
+#define REDIS_EPS (1e-6) 
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
@@ -618,6 +627,14 @@ typedef struct redisDb {
      * @date: 2018.10.23
      */
     int current_penalty_class_turn; // 取值为 (1 << 10 or 1 << 11)
+
+    /**
+     * 用来记录当前数据库一共进行了多少次DP调整
+     * 在adjust_cnt == 0 时, 对内存使用默认的淘汰策略
+     * @author: cheng pan
+     * @date: 2018.10.31
+     */
+    int adjust_cnt; 
 
     // 数据库的键的平均 TTL ，统计信息
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -1672,6 +1689,13 @@ extern dictType replScriptCacheDictType;
  * Functions prototypes
  *----------------------------------------------------------------------------*/
 
+/**
+ * 遍历size_pcid, 打印所有key-value对的size大小（调试专用）
+ * @author: cheng pan
+ * @date: 2018.10.31
+ */
+void printAllKeyValueSize(redisClient *c);
+
 /* Utils */
 long long ustime(void);
 long long mstime(void);
@@ -2053,6 +2077,12 @@ long long getLastAccessTime(redisDb *db, robj *key);
  * @date: 201.10.23
  */
 void setLastAccessTime(redisDb *db, robj *key, long long last_access_time);
+/**
+ * 增加设置key value size的接口
+ * @author: cheng pan
+ * @date: 2018.11.3
+ */
+void setKeyValueSize(redisDb *db, robj *key, unsigned size);
 
 robj *lookupKey(redisDb *db, robj *key);
 robj *lookupKeyRead(redisDb *db, robj *key);

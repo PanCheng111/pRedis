@@ -7,7 +7,10 @@
         "slist": "cpp",
         "dict.h": "c",
         "rthrec.h": "c",
-        "*.ipp": "c"
+        "*.ipp": "c",
+        "ratio": "c",
+        "type_traits": "c",
+        "chrono": "c"
     },
     "C_Cpp.errorSquiggles": "Disabled"
 }

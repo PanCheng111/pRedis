@@ -13,7 +13,7 @@ long long maxer(long long a, long long b) {
 
 /**
  * 用来将一个长的reuse time进行压缩，以便存储
- * @authorL cheng pan
+ * @author: cheng pan
  * @date: 2018.10.22
  */ 
 long domain_value_to_index(long value) {
@@ -106,20 +106,24 @@ long long rthUpdate(rthRec *rth, robj *key, unsigned ori_size, unsigned cur_size
  * @author: cheng pan
  * @date: 2018.10.22
  */
-void rthCalcMRC(rthRec *rth, unsigned long long tot_memory, unsigned int PGAP) {
+void rthCalcMRC(rthRec *rth, long long tot_memory, unsigned int PGAP) {
     double sum = 0, tot = 0, N = 0;
     long step = 1; int dom = 1,dT = 1;
     long T = 0;
 
     double read_sum = 0;
     double read_N = 0;
-    for (int i = 0; i < rth_MAXS; i++) {
+    for (int i = 0; i < rth_RTD_LENGTH; i++) {
         read_N += rth->read_rtd[i];
         N += rth->rtd[i] + rth->rtd_del[i];
     }
     // System.out.println("N="+N + ", read_N="+read_N);
+    rth->mrc = (double *)zmalloc((tot_memory / PGAP) * sizeof(double) + 10);
+    memset(rth->mrc, 0, tot_memory / PGAP * sizeof(double) + 10);
+    rth->mrc[0] = 1.0;
+    if (read_N == 0) return;
     for (long c = PGAP; c <= tot_memory; c += PGAP) {
-        while (dT < rth_MAXS) {
+        while (dT < rth_RTD_LENGTH) {
     		double d = 1.0 * (rth->rtd[dT] + rth->rtd_del[dT]);
     		double tmp = step - (sum * step + d * (1 + step) / 2) / N;
     		if (tot + tmp > c) break;
@@ -152,7 +156,9 @@ void rthClear(rthRec *rth) {
     memset(rth->rtd, 0, sizeof(rth->rtd));
     memset(rth->rtd_del, 0, sizeof(rth->rtd_del));
     memset(rth->read_rtd, 0, sizeof(rth->read_rtd));
-    memset(rth->mrc, 0, sizeof(rth->mrc));
+    //memset(rth->mrc, 0, sizeof(rth->mrc));
+    if (rth->mrc != NULL) zfree(rth->mrc);
+    rth->mrc = NULL;
     rth->n = 0;
     rth->tot_penalty = 0;
 } 
