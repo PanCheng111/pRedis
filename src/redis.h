@@ -514,8 +514,8 @@ struct evictionPoolEntry {
  * @author: cheng pan
  * @date: 2018.10.23
  */
-//#define REDIS_DB_ADJUST_CNT 1000000 // 默认设置100w次访问之后，就进行一次调整操作
-#define REDIS_DB_ADJUST_CNT 5000 // 默认设置1000次访问之后，就进行一次调整操作
+#define REDIS_DB_ADJUST_CNT 1000000 // 默认设置100w次访问之后，就进行一次调整操作
+//#define REDIS_DB_ADJUST_CNT 20000 // 默认设置1000次访问之后，就进行一次调整操作
 
 /**
  * 定义在进行各个penalty class进行分配的时候，划分的最小粒度是多少

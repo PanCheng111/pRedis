@@ -509,22 +509,24 @@ void exitFromChild(int retcode) {
  * @author: cheng pan
  * @date: 2018.11.4
  */
-long long calcAllExtraSize(redisClient *c) {
+long long calcAllExtraSize(redisDb *db) {
     long long ret = 0;
-    printf("dict_miss_times size = %d, len = %d\n", dictBlobLen(c->db->miss_times), dictSize(c->db->miss_times));
-    printf("dict_miss_penaltis size = %d, len = %d\n", dictBlobLen(c->db->miss_penalties), dictSize(c->db->miss_penalties));
+    //printf("dict_miss_times size = %d, len = %d\n", dictBlobLen(db->miss_times), dictSize(db->miss_times));
+    //printf("dict_miss_penaltis size = %d, len = %d\n", dictBlobLen(db->miss_penalties), dictSize(db->miss_penalties));
+    //for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
+    //    printf("dict_penalty_classes[%d] size = %d, len = %d\n", i, dictBlobLen(db->penalty_classes[i]), dictSize(db->penalty_classes[i]));
+    //printf("dict_size_pcid size = %d, len = %d\n", dictBlobLen(db->size_pcid), dictSize(db->size_pcid));
+    //printf("dict_reuse_time_sample size = %d, len = %d\n", dictBlobLen(db->reuse_time_sample), dictSize(db->reuse_time_sample));
+    ret += dictBlobLen(db->miss_times);
+    ret += dictBlobLen(db->miss_penalties);
+    ret += dictBlobLen(db->size_pcid);
+    ret += dictBlobLen(db->reuse_time_sample);
     for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
-        printf("dict_penalty_classes[%d] size = %d, len = %d\n", i, dictBlobLen(c->db->penalty_classes[i]), dictSize(c->db->penalty_classes[i]));
-    printf("dict_size_pcid size = %d, len = %d\n", dictBlobLen(c->db->size_pcid), dictSize(c->db->size_pcid));
-    printf("dict_reuse_time_sample size = %d, len = %d\n", dictBlobLen(c->db->reuse_time_sample), dictSize(c->db->reuse_time_sample));
-    ret += dictBlobLen(c->db->miss_times);
-    ret += dictBlobLen(c->db->miss_penalties);
-    ret += dictBlobLen(c->db->size_pcid);
-    ret += dictBlobLen(c->db->reuse_time_sample);
-    for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
-        ret += dictBlobLen(c->db->penalty_classes[i]);
-    for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
-        ret += zmalloc_size(c->db->rth_rec[i]);
+        ret += dictBlobLen(db->penalty_classes[i]);
+    if (db == server.db) { // 说明是第一个数据库
+        for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
+            ret += zmalloc_size(db->rth_rec[i]);
+    }
     return ret;
 }
 
@@ -2349,7 +2351,7 @@ void initServer() {
         server.db[j].miss_times = dictCreate(&missDictType,NULL);
         server.db[j].miss_penalties = dictCreate(&missDictType,NULL);
         for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
-            server.db[j].pclass_mem_alloc[i] = -1; // -1 表示没有给每个penalty class分配对应的空间大小
+            server.db[j].pclass_mem_alloc[i] = 0; // 0 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
             server.db[j].penalty_classes[i] = dictCreate(&missDictType, NULL); //维护penalty class中的key
             server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
@@ -2624,6 +2626,7 @@ struct redisCommand *lookupCommandByCString(char *s) {
     return cmd;
 }
 
+
 /* Lookup the command in the current table, if not found also check in
  * the original table containing the original command names unaffected by
  * redis.conf rename-command statement.
@@ -2804,6 +2807,7 @@ void call(redisClient *c, int flags) {
      * @date: 2018.10.22
      */
     if (c->cmd->firstkey == 1) {
+        
         size_after_proc = getKeyValueSize(c->db, c->argv[1]);
         last_access_time = getLastAccessTime(c->db, c->argv[1]);
         // 注意， 如果该key没有被加入到redis中，则pclass会返回-1。此时相当于cold miss，我们不做任何处理直到该key被setback回来。
@@ -2839,6 +2843,7 @@ void call(redisClient *c, int flags) {
                 setLastAccessTime(c->db, c->argv[1], cur_time);
             }
         }
+        
         c->db->access_cnt ++;
 
         /**
@@ -2847,10 +2852,10 @@ void call(redisClient *c, int flags) {
          * @date: 2018.10.31
          */
         if (c->db->access_cnt % 1000 == 0) {
-            printAllKeyValueSize(c);
-          //  long long extra_size = calcAllExtraSize(c);
+          //  printAllKeyValueSize(c);
+          //  long long extra_size = calcAllExtraSize(c->db);
           //  printf("extra_size = %lld\n=======================\n", extra_size);
-            fflush(stdout);
+          //  fflush(stdout);
         }
     }
 
@@ -2860,6 +2865,7 @@ void call(redisClient *c, int flags) {
      * @date: 2018.10.23
      */ 
     if (c->db->access_cnt == REDIS_DB_ADJUST_CNT) {
+        printf("doing adjust ... \n");
         /**
          * 需要计算除了meta data之外的，一共在key-value中消耗的内存是多少
          * @author: cheng pan
@@ -2870,7 +2876,14 @@ void call(redisClient *c, int flags) {
           //  printf("pclass_mem_used[%d]=%d\n", i, c->db->pclass_mem_used[i]);
             tot_mem += c->db->pclass_mem_used[i];
         }
-        printf("tot_mem = %lld\n", tot_mem);
+       // printf("tot_mem = %lld\n", tot_mem);
+        /**
+         * 如果设置了最大内存，则配置
+         * @author: cheng pan
+         * @date: 2018.11.4
+         */ 
+        if (server.maxmemory) tot_mem = server.maxmemory;
+
         // 到达设置的进行调整的访问阈值，此处执行一次动态规划进行各个penalty class的大小
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
             rthCalcMRC(c->db->rth_rec[i], tot_mem, REDIS_MEM_ALLOC_GRAND);
@@ -4005,7 +4018,7 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
     count = server.maxmemory_samples;
     for (j = 0; j < count; j++) samples[j] = dictGetRandomKey(sampledict);
 #endif
-
+    //printf("eviction pool populate, count = %d\n", count);
     for (j = 0; j < count; j++) {
         unsigned long long idle;
         sds key;
@@ -4086,6 +4099,15 @@ int freeMemoryIfNeeded(void) {
         mem_used -= sdslen(server.aof_buf);
         mem_used -= aofRewriteBufferSize();
     }
+
+
+    /**
+     * 这里除去维护信息所需要的内存
+     * @author: cheng pan
+     * @date: 2018.11.4
+     */ 
+    for (int j = 0; j < server.dbnum; j++)
+        mem_used -= calcAllExtraSize(server.db+j);
 
     /* Check if we are over the memory limit. */
     // 如果目前使用的内存大小比设置的 maxmemory 要小，那么无须执行进一步操作
@@ -4224,6 +4246,7 @@ int freeMemoryIfNeeded(void) {
                 notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
                     keyobj, db->id);
                 decrRefCount(keyobj);
+                //zfree(keyobj);
                 keys_freed++;
 
                 /* When the memory to free starts to be big enough, we may
@@ -4302,17 +4325,19 @@ int freePenaltyClassMemoryIfNeeded(void) {
     for (int i = 0; i < server.dbnum; i++) {
         
         redisDb *db = server.db + i;
-        for (int j = 0; j < REDIS_MAX_PENALTY_CLASS; j++) {
+        for (int j = 1; j < REDIS_MAX_PENALTY_CLASS; j++) {
             // 如果不需要释放，直接跳过。
             if (db->pclass_mem_used[j] <= db->pclass_mem_alloc[j]) continue;
+            // printf("pclass_mem_used[%d]=%d, pclass_mem_alloc[%d]=%d\n", j, db->pclass_mem_used[j], j, db->pclass_mem_alloc[j]);
             /* Compute how much memory we need to free. */
             // 计算需要释放多少字节的内存
-            mem_tofree = db->pclass_mem_alloc[j] - db->pclass_mem_used[j];
+            mem_tofree = db->pclass_mem_used[j] - db->pclass_mem_alloc[j];
             // 初始化已释放内存的字节数为 0
             mem_freed = 0;
 
             // 根据 maxmemory 策略，
             // 遍历字典，释放内存并记录被释放内存的字节数
+           // printf("mem_freed = %d, mem_tofree = %d\n", mem_freed, mem_tofree);
             while (mem_freed < mem_tofree) {
                 int k, keys_freed = 0;
                 long bestval = 0; /* just to prevent warning */
@@ -4406,7 +4431,7 @@ int freePenaltyClassMemoryIfNeeded(void) {
                 // 删除被选中的键
                 if (bestkey) {
                     long long delta;
-
+                    //printf("bestkey = %s\n", bestkey);
                     robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
                     propagateExpire(db, keyobj);
                     /* We compute the amount of memory freed by dbDelete() alone.
@@ -4418,17 +4443,26 @@ int freePenaltyClassMemoryIfNeeded(void) {
                     * AOF and Output buffer memory will be freed eventually so
                     * we only care about memory used by the key space. */
                     // 计算删除键所释放的内存数量
-                    delta = (long long) zmalloc_used_memory();
+                    //delta = (long long) zmalloc_used_memory();
+                    delta = getKeyValueSize(db,keyobj); //(long long) zmalloc_used_memory();
+                    /**
+                     * 在删除数据库的同时，还需要删除对应在penalty_classes[]中的key
+                     * @author: cheng pan
+                     * @date: 2018.11.4
+                     */ 
+                    redisAssertWithInfo(NULL, keyobj, j == getPenaltyClass(db, keyobj)); // 确保该key属于该penalty class
+
                     dbDelete(db,keyobj);
-                    delta -= (long long) zmalloc_used_memory();
                     mem_freed += delta;
-                    
+                    //printf("mem delta = %d\n", delta);
+
                     // 对淘汰键的计数器增一
                     server.stat_evictedkeys++;
 
                     notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
                         keyobj, db->id);
                     decrRefCount(keyobj);
+                    //zfree(keyobj);
                     keys_freed++;
 
                     /* When the memory to free starts to be big enough, we may

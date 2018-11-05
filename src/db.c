@@ -255,6 +255,17 @@ void setKeyValueSize(redisDb *db, robj *key, unsigned size) {
     if (pcid != 0) {
         // 说明此时该key已经归属于某个penalty class，更新该class的内存使用
         db->pclass_mem_used[pcid] += ((long long)size - (long long)ori_size);
+        /**
+         * 如果该key不再penalty_classes中，需要添加进去
+         * 注意，需要size不为0才需要添加。
+         * @author: cheng pan
+         * @date: 2018.11.5
+         */
+        if (size != 0 && dictFind(db->penalty_classes[pcid], key->ptr) == NULL) {
+            sds copy = sdsdup(key->ptr);
+            entry = dictReplaceRaw(db->penalty_classes[pcid], copy);
+            dictSetSignedIntegerVal(entry, 0); // 避免warning
+        } 
     }
 }
 
@@ -477,6 +488,18 @@ int dbDelete(redisDb *db, robj *key) {
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
 
     /**
+     * 若该key已经属于某个penalty class了，那么需要将这个penalty clas中的key也对应删除
+     * @author: cheng pan
+     * @date: 2018.11.4
+     */
+    int pcid = getPenaltyClass(db, key);
+    if (pcid > 0) {
+        //unsigned int ori_size = getKeyValueSize(db, key);
+        //db->pclass_mem_used[pcid] -= (long long)ori_size; //这里不需要维护db->pclass_mem_used，因为下面setKeyValueSize中已经进行维护。
+        dictDelete(db->penalty_classes[pcid], key->ptr);
+    }
+
+    /**
      * 对于删除操作，更新key-value的size为0
      * @author: cheng pan
      * @date: 2018.10.22
@@ -559,7 +582,7 @@ long long emptyDb(void(callback)(void*)) {
         dictEmpty(server.db[j].miss_penalties, callback);
         for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
             dictEmpty(server.db[j].penalty_classes[i], callback);   
-            server.db[j].pclass_mem_alloc[i] = -1; // -1 表示没有给每个penalty class分配对应的空间大小
+            server.db[j].pclass_mem_alloc[i] = 0; // 0 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
             server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
             rthClear(server.db[j].rth_rec[i]);
@@ -1176,8 +1199,8 @@ void changePenaltyClassId(redisDb *db, robj *key, int pclassID) {
     if (ori_pcid != 0) {
         // 从原有的penalty class中删除
         //printf("before del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
-        dictDelete(db->penalty_classes[ori_pcid], key->ptr);
-        db->pclass_mem_used[ori_pcid] -= ori_size;
+        int ret = dictDelete(db->penalty_classes[ori_pcid], key->ptr);
+        if (ret = DICT_OK) db->pclass_mem_used[ori_pcid] -= ori_size;
         //printf("after del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
     }
     dictSetUnsigned32HighVal(entry, (unsigned) pclassID | db->current_penalty_class_turn);
@@ -1872,6 +1895,7 @@ void persistCommand(redisClient *c) {
  * @date: 2018.10.23
  */ 
 int judgePenaltyClass(long long penalty_time) {
+    penalty_time >>= 7;
     if (penalty_time <= 1) return 1;
     if (penalty_time <= 2) return 2;
     if (penalty_time <= 4) return 3;
@@ -1994,6 +2018,20 @@ void setMissPenalty(redisDb *db, robj *key, long long penalty) {
      */ 
     if (checkSetPenaltyClassTurn(db, key) == 1) {
         changePenaltyClassId(db, key, judgePenaltyClass(penalty));
+    }
+    else {
+        /**
+         * 到达此处说明该key不能被第二次设置
+         * 但是还是要判断这个key是否被插入到penalty_classes中去了（因为有可能被evict）
+         * @atuhor: cheng pan
+         * @date: 2018.11.4
+         */
+        int pcid = getPenaltyClass(db, key);
+        if (pcid > 0 && dictFind(db->penalty_classes[pcid], key->ptr) == NULL) {
+            sds copy = sdsdup(key->ptr);
+            de = dictReplaceRaw(db->penalty_classes[pcid], copy);
+            dictSetSignedIntegerVal(de, 0); // 为了避免warning
+        } 
     }
 
 }
