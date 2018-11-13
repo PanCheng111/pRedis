@@ -116,11 +116,13 @@ void rthCalcMRC(rthRec *rth, long long tot_memory, unsigned int PGAP) {
     for (int i = 0; i < rth_RTD_LENGTH; i++) {
         read_N += rth->read_rtd[i];
         N += rth->rtd[i] + rth->rtd_del[i];
+    //    if (rth->rtd[i] > 0 || rth->rtd_del[i] > 0 || rth->read_rtd[i] > 0)
+    //        printf("rtd[%d]=%d, read_rtd[%d]=%d, rtd_del[%d]=%d\n", i, rth->rtd[i], i, rth->read_rtd[i], i, rth->rtd_del[i]);
     }
-    // System.out.println("N="+N + ", read_N="+read_N);
     rth->mrc = (double *)zmalloc((tot_memory / PGAP) * sizeof(double) + 10);
     memset(rth->mrc, 0, tot_memory / PGAP * sizeof(double) + 10);
-    rth->mrc[0] = 1.0;
+    for (int i = 0; i < tot_memory / PGAP + 1; i ++)
+        rth->mrc[i] = 1.0;
     if (read_N == 0) return;
     for (long c = PGAP; c <= tot_memory; c += PGAP) {
         while (dT < rth_RTD_LENGTH) {

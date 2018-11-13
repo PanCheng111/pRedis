@@ -13253,33 +13253,3 @@ pclass_mem_alloc[4] = 1048576, pclass_mem_used[4] = 883098
 pclass_mem_alloc[3] = 24117248, pclass_mem_used[3] = 24370234
 pclass_mem_alloc[2] = 6291456, pclass_mem_used[2] = 4948337
 pclass_mem_alloc[1] = 0, pclass_mem_used[1] = 304518
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-pRedis: 
-======== stats ======== 
-read miss cnt = 1196453
-update miss cnt = 0
-avg read latency = 112.222
-avg tot latency = 112.222
-
-
-Redis:
-======== stats ======== 
-read miss cnt = 1194996
-update miss cnt = 0
-avg read latency = 134.977
-avg tot latency = 134.977
-

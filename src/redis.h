@@ -522,8 +522,8 @@ struct evictionPoolEntry {
  * @author: cheng pan
  * @date: 2018.10.23
  */
-//#define REDIS_MEM_ALLOC_GRAND (1024 * 1024) // 默认 1MB 为分配的单位
-#define REDIS_MEM_ALLOC_GRAND (1024) // 默认 1KB 为分配的单位
+#define REDIS_MEM_ALLOC_GRAND (1024 * 1024) // 默认 1MB 为分配的单位
+//#define REDIS_MEM_ALLOC_GRAND (1024) // 默认 1KB 为分配的单位
 
 /**
  * 定义设置penalty class的掩码

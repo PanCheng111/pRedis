@@ -2790,7 +2790,11 @@ void call(redisClient *c, int flags) {
     unsigned int size_before_proc = 0;
     unsigned int size_after_proc = 0;
     long long last_access_time = 0;
-    if (c->cmd->firstkey == 1) size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
+    int need_to_sample = 0;
+    if (c->cmd->firstkey == 1) {
+        need_to_sample = ((dictHashKey(c->db->dict, c->argv[1]->ptr) % 1000) < 100);
+        size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
+    }
 
     // 计算命令开始执行的时间
     start = ustime();
@@ -2806,7 +2810,7 @@ void call(redisClient *c, int flags) {
      * @author: cheng pan
      * @date: 2018.10.22
      */
-    if (c->cmd->firstkey == 1) {
+    if (c->cmd->firstkey == 1 && need_to_sample) {
         
         size_after_proc = getKeyValueSize(c->db, c->argv[1]);
         last_access_time = getLastAccessTime(c->db, c->argv[1]);
@@ -2816,7 +2820,7 @@ void call(redisClient *c, int flags) {
         long long mspenalty = getMissPenalty(c->db, c->argv[1]);
         //printf("access: key=%s, mspenalty=%lld, c->flags=%d\n", c->argv[1]->ptr, mspenalty, c->cmd->flags);
         long long cur_time;
-        if (c->cmd->flags & REDIS_CMD_READONLY) {
+        if (c->cmd->flags & REDIS_CMD_READONLY && pclass != -1) {
             // GET 操作
             if (size_after_proc == REDIS_KEYVALUE_SIZE_NULL /*0xFFFFFFFF*/) {
                 // 第一次读miss操作，此时还不知道该key-value的size
@@ -2829,7 +2833,7 @@ void call(redisClient *c, int flags) {
                 setLastAccessTime(c->db, c->argv[1], cur_time);
             }
         }
-        else if (c->cmd->flags & REDIS_CMD_WRITE) {
+        else if (c->cmd->flags & REDIS_CMD_WRITE && pclass != -1) {
             // UPDATE 操作
             if (size_before_proc == REDIS_KEYVALUE_SIZE_NULL /*0xFFFFFFFF*/) { //写操作发现该key不存在，说明该操作是一个set-back操作，可以用来弥补之前的一个GET MISS操作
                 size_before_proc = 0; 
@@ -2844,7 +2848,6 @@ void call(redisClient *c, int flags) {
             }
         }
         
-        c->db->access_cnt ++;
 
         /**
          * 调试输出专用
@@ -2859,6 +2862,7 @@ void call(redisClient *c, int flags) {
         }
     }
 
+    c->db->access_cnt ++;
     /**
      * 在这里进行动态规划的调整，给每个penalty class分配具体多少空间
      * @author: cheng pan
@@ -2882,7 +2886,7 @@ void call(redisClient *c, int flags) {
          * @author: cheng pan
          * @date: 2018.11.4
          */ 
-        if (server.maxmemory) tot_mem = server.maxmemory;
+        //if (server.maxmemory) tot_mem = server.maxmemory;
 
         // 到达设置的进行调整的访问阈值，此处执行一次动态规划进行各个penalty class的大小
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
@@ -2892,12 +2896,12 @@ void call(redisClient *c, int flags) {
         double **f = createDoubleMatrix(REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1, 1e20); // 动态规划数组，用来求最小的miss penalty
         f[0][0] = 0;
         rthRec **rths = c->db->rth_rec;
-        // for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++) {
-        //     printf("rth[%d]: tot_penalty: %lld\n\n miss ratio: ", i, rths[i]->tot_penalty);
-        //     for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j++)
-        //         printf("%.3lf, ", rths[i]->mrc[j]);
-        //     printf("\n");
-        // }
+        for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++) {
+            printf("rth[%d]: tot_penalty: %lld\n\n miss ratio: ", i, rths[i]->tot_penalty);
+            for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j++)
+                printf("%.3lf, ", rths[i]->mrc[j]);
+            printf("\n");
+        }
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
             for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j ++)
                 for (int k = 0; k <= j; k++) {
@@ -2912,13 +2916,13 @@ void call(redisClient *c, int flags) {
         //    printf("f[%d][%d]=%.3lf\n", i, j, f[i][j]);
             int t = bck[i][j];
             c->db->pclass_mem_alloc[i] = (j - t) * REDIS_MEM_ALLOC_GRAND;
-        //    printf("pclass_mem_alloc[%d] = %lld, pclass_mem_used[%d] = %lld\n", i, c->db->pclass_mem_alloc[i], i, c->db->pclass_mem_used[i]);
+            printf("pclass_mem_alloc[%d] = %lld, pclass_mem_used[%d] = %lld\n", i, c->db->pclass_mem_alloc[i], i, c->db->pclass_mem_used[i]);
             j = t;
         }
         // 这里释放进行动态规划的辅助数组，以防止内存泄露
         freeIntMatrix(bck, REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
         freeDoubleMatrix(f, REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
-
+        //exit(1);
         /**
          * 调整完分配方案之后，需要完成的工作有：
          * 1) 清空所有rth_rec中的统计信息，为下一phase的统计做准备；
@@ -3154,7 +3158,7 @@ int processCommand(redisClient *c) {
              * @author: cheng pan
              * @date: 2018.10.21
              */
-            retval = freePenaltyClassMemoryIfNeeded();
+            retval = freeMemoryIfNeeded_test();//freePenaltyClassMemoryIfNeeded();
         }
         // 如果即将要执行的命令可能占用大量内存（REDIS_CMD_DENYOOM）
         // 并且前面的内存释放失败的话
@@ -4189,6 +4193,219 @@ int freeMemoryIfNeeded(void) {
                         /* If the key exists, is our pick. Otherwise it is
                          * a ghost and we need to try the next element. */
                         if (de) {
+                            bestkey = dictGetKey(de);
+                            break;
+                        } else {
+                            /* Ghost... */
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            /* volatile-ttl */
+            // 策略为 volatile-ttl ，从一集 sample 键中选出过期时间距离当前时间最接近的键
+            else if (server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_TTL) {
+                for (k = 0; k < server.maxmemory_samples; k++) {
+                    sds thiskey;
+                    long thisval;
+
+                    de = dictGetRandomKey(dict);
+                    thiskey = dictGetKey(de);
+                    thisval = (long) dictGetVal(de);
+
+                    /* Expire sooner (minor expire unix timestamp) is better
+                     * candidate for deletion */
+                    if (bestkey == NULL || thisval < bestval) {
+                        bestkey = thiskey;
+                        bestval = thisval;
+                    }
+                }
+            }
+
+            /* Finally remove the selected key. */
+            // 删除被选中的键
+            if (bestkey) {
+                long long delta;
+
+                robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
+                propagateExpire(db,keyobj);
+                /* We compute the amount of memory freed by dbDelete() alone.
+                 * It is possible that actually the memory needed to propagate
+                 * the DEL in AOF and replication link is greater than the one
+                 * we are freeing removing the key, but we can't account for
+                 * that otherwise we would never exit the loop.
+                 *
+                 * AOF and Output buffer memory will be freed eventually so
+                 * we only care about memory used by the key space. */
+                // 计算删除键所释放的内存数量
+                delta = (long long) zmalloc_used_memory();
+                dbDelete(db,keyobj);
+                delta -= (long long) zmalloc_used_memory();
+                mem_freed += delta;
+                
+                // 对淘汰键的计数器增一
+                server.stat_evictedkeys++;
+
+                notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
+                    keyobj, db->id);
+                decrRefCount(keyobj);
+                //zfree(keyobj);
+                keys_freed++;
+
+                /* When the memory to free starts to be big enough, we may
+                 * start spending so much time here that is impossible to
+                 * deliver data to the slaves fast enough, so we force the
+                 * transmission here inside the loop. */
+                if (slaves) flushSlavesOutputBuffers();
+            }
+        }
+
+        if (!keys_freed) return REDIS_ERR; /* nothing to free... */
+    }
+
+    return REDIS_OK;
+}
+
+/**
+ * 判断该penalty class是否该淘汰
+ * @author: cheng pan
+ * @date: 2018.11.6
+ */
+int need_to_evit(redisDb *db, sds key) {
+    robj *keyobj = createStringObject(key, sdslen(key));
+    int pcid = getPenaltyClass(db, keyobj);
+    if (pcid > 0 && db->pclass_mem_used[pcid] > db->pclass_mem_alloc[pcid]) {
+        zfree(keyobj);
+        return 1;
+    }
+    zfree(keyobj);
+    return 0;
+} 
+
+/**
+ * 测试淘汰的时候，查看对应的key是否是想要淘汰的
+ * @author: cheng pan
+ * @date: 2018.11.6
+ */ 
+int freeMemoryIfNeeded_test(void) {
+    size_t mem_used, mem_tofree, mem_freed;
+    int slaves = listLength(server.slaves);
+
+    /* Remove the size of slaves output buffers and AOF buffer from the
+     * count of used memory. */
+    // 计算出 Redis 目前占用的内存总数，但有两个方面的内存不会计算在内：
+    // 1）从服务器的输出缓冲区的内存
+    // 2）AOF 缓冲区的内存
+    mem_used = zmalloc_used_memory();
+    if (slaves) {
+        listIter li;
+        listNode *ln;
+
+        listRewind(server.slaves,&li);
+        while((ln = listNext(&li))) {
+            redisClient *slave = listNodeValue(ln);
+            unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
+            if (obuf_bytes > mem_used)
+                mem_used = 0;
+            else
+                mem_used -= obuf_bytes;
+        }
+    }
+    if (server.aof_state != REDIS_AOF_OFF) {
+        mem_used -= sdslen(server.aof_buf);
+        mem_used -= aofRewriteBufferSize();
+    }
+
+
+    /**
+     * 这里除去维护信息所需要的内存
+     * @author: cheng pan
+     * @date: 2018.11.4
+     */ 
+    for (int j = 0; j < server.dbnum; j++)
+        mem_used -= calcAllExtraSize(server.db+j);
+
+    /* Check if we are over the memory limit. */
+    // 如果目前使用的内存大小比设置的 maxmemory 要小，那么无须执行进一步操作
+    if (mem_used <= server.maxmemory) return REDIS_OK;
+
+    // 如果占用内存比 maxmemory 要大，但是 maxmemory 策略为不淘汰，那么直接返回
+    if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
+        return REDIS_ERR; /* We need to free memory, but policy forbids. */
+
+    /* Compute how much memory we need to free. */
+    // 计算需要释放多少字节的内存
+    mem_tofree = mem_used - server.maxmemory;
+
+    // 初始化已释放内存的字节数为 0
+    mem_freed = 0;
+
+    // 根据 maxmemory 策略，
+    // 遍历字典，释放内存并记录被释放内存的字节数
+    while (mem_freed < mem_tofree) {
+        int j, k, keys_freed = 0;
+
+        // 遍历所有字典
+        for (j = 0; j < server.dbnum; j++) {
+            long bestval = 0; /* just to prevent warning */
+            sds bestkey = NULL;
+            dictEntry *de;
+            redisDb *db = server.db+j;
+            dict *dict;
+
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_LRU ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_RANDOM)
+            {
+                // 如果策略是 allkeys-lru 或者 allkeys-random 
+                // 那么淘汰的目标为所有数据库键
+                dict = server.db[j].dict;
+            } else {
+                // 如果策略是 volatile-lru 、 volatile-random 或者 volatile-ttl 
+                // 那么淘汰的目标为带过期时间的数据库键
+                dict = server.db[j].expires;
+            }
+
+            // 跳过空字典
+            if (dictSize(dict) == 0) continue;
+
+            /* volatile-random and allkeys-random policy */
+            // 如果使用的是随机策略，那么从目标字典中随机选出键
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_RANDOM ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_RANDOM)
+            {
+                de = dictGetRandomKey(dict);
+                bestkey = dictGetKey(de);
+            }
+
+            /* volatile-lru and allkeys-lru policy */
+            // 如果使用的是 LRU 策略，
+            // 那么从一集 sample 键中选出 IDLE 时间最长的那个键
+            else if (server.maxmemory_policy == REDIS_MAXMEMORY_ALLKEYS_LRU ||
+                server.maxmemory_policy == REDIS_MAXMEMORY_VOLATILE_LRU)
+            {
+                struct evictionPoolEntry *pool = db->eviction_pool;
+
+                while(bestkey == NULL) {
+                    evictionPoolPopulate(dict, db->dict, db->eviction_pool);
+                    /* Go backward from best to worst element to evict. */
+                    for (k = REDIS_EVICTION_POOL_SIZE-1; k >= 0; k--) {
+                        if (pool[k].key == NULL) continue;
+                        de = dictFind(dict,pool[k].key);
+
+                        /* Remove the entry from the pool. */
+                        sdsfree(pool[k].key);
+                        /* Shift all elements on its right to left. */
+                        memmove(pool+k,pool+k+1,
+                            sizeof(pool[0])*(REDIS_EVICTION_POOL_SIZE-k-1));
+                        /* Clear the element on the right which is empty
+                         * since we shifted one position to the left.  */
+                        pool[REDIS_EVICTION_POOL_SIZE-1].key = NULL;
+                        pool[REDIS_EVICTION_POOL_SIZE-1].idle = 0;
+
+                        /* If the key exists, is our pick. Otherwise it is
+                         * a ghost and we need to try the next element. */
+                        if (de && need_to_evit(db, dictGetKey(de))) {
                             bestkey = dictGetKey(de);
                             break;
                         } else {

@@ -838,7 +838,7 @@ void printAllKeyValueSize(redisClient *c) {
     printf("tot_size = %d\n", tot_size);
 
 
-    printf("zmalloc_size = %d\n", zmalloc_used_memory());
+    printf("zmalloc_size = %ld\n", zmalloc_used_memory());
     dictReleaseIterator(di);
 
    //for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
@@ -1200,7 +1200,7 @@ void changePenaltyClassId(redisDb *db, robj *key, int pclassID) {
         // 从原有的penalty class中删除
         //printf("before del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
         int ret = dictDelete(db->penalty_classes[ori_pcid], key->ptr);
-        if (ret = DICT_OK) db->pclass_mem_used[ori_pcid] -= ori_size;
+        if (ret == DICT_OK) db->pclass_mem_used[ori_pcid] -= ori_size;
         //printf("after del: dictSize(penalty_class[%d])=%d\n", o->pclass, dictSize(db->penalty_classes[o->pclass]));
     }
     dictSetUnsigned32HighVal(entry, (unsigned) pclassID | db->current_penalty_class_turn);
@@ -1276,8 +1276,9 @@ void setpclassIdCommand(redisClient *c) {
         if (pclass < 0 || pclass >= REDIS_MAX_PENALTY_CLASS) {
             sprintf(response, "Error, please set penalty class between 0~%d", REDIS_MAX_PENALTY_CLASS - 1);
         } else {
-            if (checkSetPenaltyClassTurn(c->db, c->argv[1]) == 1) {
+            if (/*checkSetPenaltyClassTurn(c->db, c->argv[1]) == 1*/ 1 ) {
                 changePenaltyClassId(c->db, c->argv[1], (unsigned) pclass);
+                //setMissPenalty(c->db, c->argv[1], (1<<(pclass-1)));
                 sprintf(response, "OK, set the %s's pclass ID to %u", (char *)c->argv[1]->ptr, (unsigned) pclass);
             }
             else {
@@ -1895,7 +1896,7 @@ void persistCommand(redisClient *c) {
  * @date: 2018.10.23
  */ 
 int judgePenaltyClass(long long penalty_time) {
-    penalty_time >>= 7;
+    //penalty_time >>= 5;
     if (penalty_time <= 1) return 1;
     if (penalty_time <= 2) return 2;
     if (penalty_time <= 4) return 3;
