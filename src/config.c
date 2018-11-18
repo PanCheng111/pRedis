@@ -512,6 +512,17 @@ void loadServerConfigFromString(char *config) {
                 err = sentinelHandleConfiguration(argv+1,argc-1);
                 if (err) goto loaderr;
             }
+        } 
+        /**
+         * 增加一个配置项，配置是否需要手动设置每个key所属的penalty class
+         * @author: cheng pan
+         * @date: 2018.11.18
+         */ 
+        else if (!strcasecmp(argv[0],"auto-detect-penalty-class") && argc == 2) {
+            if (!strcasecmp(argv[1], "no")) {
+                server.auto_detect_penalty_class = 0;
+                printf("shutdown auto-detect-penalty-class\n");
+            }
         } else {
             err = "Bad directive or wrong number of arguments"; goto loaderr;
         }

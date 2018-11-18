@@ -569,9 +569,18 @@ typedef struct redisDb {
      * @author: cheng pan
      * @date: 2018.10.16
      */
-    dict *penalty_classes[REDIS_MAX_PENALTY_CLASS];
+    //dict *penalty_classes[REDIS_MAX_PENALTY_CLASS];
     long long pclass_mem_used[REDIS_MAX_PENALTY_CLASS];
     long long pclass_mem_alloc[REDIS_MAX_PENALTY_CLASS];
+
+    /**
+     * 定义每个penalty class 平均的访问miss penalty， 以及hit time
+     * @author: cheng pan
+     */
+    long long pclass_avg_miss_penalty[REDIS_MAX_PENALTY_CLASS];
+    long long pclass_avg_hit_penalty[REDIS_MAX_PENALTY_CLASS];
+    long long pclass_miss_penalty_cnt[REDIS_MAX_PENALTY_CLASS];
+    long long pclass_hit_penalty_cnt[REDIS_MAX_PENALTY_CLASS];
 
     /**
      * 用于reuse time的采样，维护每个key上一次访问时间
@@ -1399,6 +1408,14 @@ struct redisServer {
     int maxmemory_policy;           /* Policy for key eviction */
     int maxmemory_samples;          /* Pricision of random sampling */
 
+    /**
+     * 设置数据库是否需要自动给key的miss penalty分类
+     * 1 代表开启自动检测penalty class，并且维护是基于单个key的，
+     * 0 代表关闭自动检测penalty class，并且需要用户自己手动维护每个key的penalty class
+     * @author: cheng pan
+     * @date: 2018.11.18
+     */
+    int auto_detect_penalty_class;
 
     /* Blocked clients */
     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */

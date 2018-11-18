@@ -518,11 +518,13 @@ long long calcAllExtraSize(redisDb *db) {
     //printf("dict_size_pcid size = %d, len = %d\n", dictBlobLen(db->size_pcid), dictSize(db->size_pcid));
     //printf("dict_reuse_time_sample size = %d, len = %d\n", dictBlobLen(db->reuse_time_sample), dictSize(db->reuse_time_sample));
     ret += dictBlobLen(db->miss_times);
-    ret += dictBlobLen(db->miss_penalties);
+    if (server.auto_detect_penalty_class == 1) ret += dictBlobLen(db->miss_penalties);
     ret += dictBlobLen(db->size_pcid);
     ret += dictBlobLen(db->reuse_time_sample);
+    #ifdef PCLASS
     for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
         ret += dictBlobLen(db->penalty_classes[i]);
+    #endif
     if (db == server.db) { // 说明是第一个数据库
         for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
             ret += zmalloc_size(db->rth_rec[i]);
@@ -2014,6 +2016,13 @@ void initServerConfig() {
     server.lua_timedout = 0;
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType,NULL);
     server.loading_process_events_interval_bytes = (1024*1024*2);
+    /**
+     * 默认打开自动检测每个key的penalty class的功能
+     * 
+     * @author: cheng pan
+     * @date: 2018.11.18
+     */
+    server.auto_detect_penalty_class = 1;
 
     // 初始化 LRU 时间
     server.lruclock = getLRUClock();
@@ -2349,11 +2358,16 @@ void initServer() {
          * @date: 2018.10.15
          */ 
         server.db[j].miss_times = dictCreate(&missDictType,NULL);
-        server.db[j].miss_penalties = dictCreate(&missDictType,NULL);
+        if (server.auto_detect_penalty_class) // 如果配置了自动检测penalty class，则需要来维护每个key的miss penalty
+            server.db[j].miss_penalties = dictCreate(&missDictType,NULL);
         for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
             server.db[j].pclass_mem_alloc[i] = 0; // 0 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
-            server.db[j].penalty_classes[i] = dictCreate(&missDictType, NULL); //维护penalty class中的key
+            server.db[j].pclass_avg_hit_penalty[i] = 0;
+            server.db[j].pclass_hit_penalty_cnt[i] = 0;
+            server.db[j].pclass_avg_miss_penalty[i] = 0;
+            server.db[j].pclass_miss_penalty_cnt[i] = 0;
+            //server.db[j].penalty_classes[i] = dictCreate(&missDictType, NULL); //维护penalty class中的key
             server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
         }
         /**
@@ -2786,14 +2800,13 @@ void call(redisClient *c, int flags) {
      * @author: cheng pan
      * @date: 2018.10.22
      */ 
-    //c->db->is_setback = 0; //设置set-back为false
     unsigned int size_before_proc = 0;
     unsigned int size_after_proc = 0;
     long long last_access_time = 0;
     int need_to_sample = 0;
     if (c->cmd->firstkey == 1) {
-        need_to_sample = ((dictHashKey(c->db->dict, c->argv[1]->ptr) % 1000) < 100);
-        size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
+        need_to_sample = ((unsigned)(dictHashKey(c->db->dict, c->argv[1]->ptr) % 1000) < 1000);
+        if (need_to_sample) size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
     }
 
     // 计算命令开始执行的时间
@@ -2817,8 +2830,10 @@ void call(redisClient *c, int flags) {
         // 注意， 如果该key没有被加入到redis中，则pclass会返回-1。此时相当于cold miss，我们不做任何处理直到该key被setback回来。
         int pclass = getPenaltyClass(c->db, c->argv[1]); 
         // 注意，如果该key还没有追踪到miss penalty， 返回-1。
-        long long mspenalty = getMissPenalty(c->db, c->argv[1]);
-        //printf("access: key=%s, mspenalty=%lld, c->flags=%d\n", c->argv[1]->ptr, mspenalty, c->cmd->flags);
+        long long mspenalty = 0;
+        if (server.auto_detect_penalty_class) mspenalty = getMissPenalty(c->db, c->argv[1]);
+            else mspenalty = c->db->pclass_avg_miss_penalty[pclass];
+        // printf("access: key=%s, mspenalty=%lld, c->flags=%d, size=%d, pclass=%d\n", c->argv[1]->ptr, mspenalty, c->cmd->flags, size_after_proc, pclass);
         long long cur_time;
         if (c->cmd->flags & REDIS_CMD_READONLY && pclass != -1) {
             // GET 操作
@@ -2897,10 +2912,10 @@ void call(redisClient *c, int flags) {
         f[0][0] = 0;
         rthRec **rths = c->db->rth_rec;
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++) {
-            printf("rth[%d]: tot_penalty: %lld\n\n miss ratio: ", i, rths[i]->tot_penalty);
+            printf("rth[%d]: tot_penalty: %lld\nmiss ratio: ", i, rths[i]->tot_penalty);
             for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j++)
                 printf("%.3lf, ", rths[i]->mrc[j]);
-            printf("\n");
+            printf("\n\n");
         }
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
             for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j ++)
@@ -4486,6 +4501,7 @@ int freeMemoryIfNeeded_test(void) {
  * @author: cheng pan
  * @date: 2018.10.21
  */ 
+#ifdef PCLASS
 int freePenaltyClassMemoryIfNeeded(void) {
     size_t mem_tofree, mem_freed;
     bool has_over_used = false;
@@ -4695,6 +4711,7 @@ int freePenaltyClassMemoryIfNeeded(void) {
     }
     return REDIS_OK;
 }
+#endif
 
 /* =================================== Main! ================================ */
 
