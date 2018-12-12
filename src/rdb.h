@@ -99,6 +99,12 @@
 #define REDIS_RDB_TYPE_SET    2
 #define REDIS_RDB_TYPE_ZSET   3
 #define REDIS_RDB_TYPE_HASH   4
+/**
+ * 在保存rdb文件时，增加一种新的类型，表示这个value已经被dump到外存了
+ * @author: cheng pan
+ * @date: 2018.11.21
+ */ 
+#define REDIS_RDB_TYPE_VALUE_DUMPED 5
 
 /* Object types for encoded objects.
  *
@@ -114,7 +120,7 @@
  *
  * 检查给定类型是否对象
  */
-#define rdbIsObjectType(t) ((t >= 0 && t <= 4) || (t >= 9 && t <= 13))
+#define rdbIsObjectType(t) ((t >= 0 && t <= 5) || (t >= 9 && t <= 13))
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType).
  *
@@ -139,6 +145,13 @@ int rdbSaveObjectType(rio *rdb, robj *o);
 int rdbLoadObjectType(rio *rdb);
 int rdbLoad(char *filename);
 int rdbSaveBackground(char *filename);
+/**
+ * 在后台启动保存某个db中的某个penalty class的函数
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */
+int rdbSaveBackgroundInPenaltyClass(int dbnum, int pclass, char *filename);
+ 
 void rdbRemoveTempFile(pid_t childpid);
 int rdbSave(char *filename);
 int rdbSaveObject(rio *rdb, robj *o);
@@ -146,6 +159,12 @@ off_t rdbSavedObjectLen(robj *o);
 off_t rdbSavedObjectPages(robj *o);
 robj *rdbLoadObject(int type, rio *rdb);
 void backgroundSaveDoneHandler(int exitcode, int bysignal);
+/**
+ * 后台dump某个penalty class结束后的处理函数
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */ 
+void backgroundSaveInPenaltyClassDoneHandler(int exitcode, int bysignal);
 int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime, long long now);
 robj *rdbLoadStringObject(rio *rdb);
 

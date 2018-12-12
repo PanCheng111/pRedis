@@ -62,6 +62,11 @@
 #include "version.h" /* Version macro */
 #include "util.h"    /* Misc functions useful in many places */
 
+/**
+ * For debug
+ */ 
+int g_loaded_dump;
+
 /* Error codes */
 #define REDIS_OK                0
 #define REDIS_ERR               -1
@@ -407,6 +412,12 @@ typedef long long mstime_t; /* millisecond time type. */
  */
 #define REDIS_ROBJ_SIZE_BITS 28
 #define REDIS_ROBJ_PCLASS_BITS 4
+/**
+ * 定义一个标记，记录当前这个key是否已经被dump到外存
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */ 
+// #define REDIS_VALUE_HAS_BEEN_DUMPED 0xFFFFFFFF
 
 typedef struct redisObject {
 
@@ -572,6 +583,24 @@ typedef struct redisDb {
     //dict *penalty_classes[REDIS_MAX_PENALTY_CLASS];
     long long pclass_mem_used[REDIS_MAX_PENALTY_CLASS];
     long long pclass_mem_alloc[REDIS_MAX_PENALTY_CLASS];
+    /**
+     * 为了压缩访问有周期性的类的空间
+     * @author: cheng pan
+     * @date: 2018.11.19
+     */ 
+    long long pclass_mem_to_reach_agreement[REDIS_MAX_PENALTY_CLASS]; // 用来记录每个类要达到约定的miss rate，至少需要多少内存
+    long long pclass_access_cnt[REDIS_MAX_PENALTY_CLASS]; // 用来记录每个类在一段时间内的访问次数
+    
+    /**
+     * 记录每个penalty class因为dump数据导致的miss数
+     * 如果累计达到10次miss，则重新载入dump文件
+     * @author: cheng pan
+     * @date: 2018.11.20
+     */ 
+    short pclass_dump_miss_cnt[REDIS_MAX_PENALTY_CLASS];
+
+    long long pclass_access_cnt_timestamp[REDIS_MAX_PENALTY_CLASS];
+
 
     /**
      * 定义每个penalty class 平均的访问miss penalty， 以及hit time
@@ -582,6 +611,13 @@ typedef struct redisDb {
     long long pclass_miss_penalty_cnt[REDIS_MAX_PENALTY_CLASS];
     long long pclass_hit_penalty_cnt[REDIS_MAX_PENALTY_CLASS];
 
+    /**
+     * 定义每个penalty class中检测出的离群点个数
+     * @author: cheng pan
+     * @date: 2018.12.11
+     */
+    int pclass_outlier_miss_penalty[REDIS_MAX_PENALTY_CLASS];
+     
     /**
      * 用于reuse time的采样，维护每个key上一次访问时间
      * @author: cheng pan
@@ -644,6 +680,12 @@ typedef struct redisDb {
      * @date: 2018.10.31
      */
     int adjust_cnt; 
+    /**
+     * 记录当前数据库中，哪个被dump数据的penalty class需要被load回来
+     * @author: cheng pan
+     * @date: 2018.11.23
+     */
+    list *pclass_needs_load_back;
 
     // 数据库的键的平均 TTL ，统计信息
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -1276,6 +1318,13 @@ struct redisServer {
     // 负责执行 BGSAVE 的子进程的 ID
     // 没在执行 BGSAVE 时，设为 -1
     pid_t rdb_child_pid;            /* PID of RDB saving child */
+    /**
+     * 增加一个维护penalty class导出时的子进程 ID
+     * @author: cheng pan
+     * @date: 2018.11.19
+     */
+    pid_t pclass_rdb_child_pid; 
+
     struct saveparam *saveparams;   /* Save points array for RDB */
     int saveparamslen;              /* Number of saving points */
     char *rdb_filename;             /* Name of RDB file */
@@ -1416,6 +1465,18 @@ struct redisServer {
      * @date: 2018.11.18
      */
     int auto_detect_penalty_class;
+    /**
+     * 设置数据库是否需要自动释放压力较轻的pclass占用的内存
+     * @author: cheng pan
+     * @date: 2018.12.5
+     */
+    int auto_release_pclass_space;
+    /**
+     * 设置server中一共使用的空间大小
+     * @author: cheng pan
+     * @date: 2018.12.5
+     */
+    int tot_mem;
 
     /* Blocked clients */
     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */
@@ -1817,6 +1878,7 @@ void decrRefCountVoid(void *o);
  * @date: 2018.9.19
  */
 unsigned int valueSizeVoid(void *o);
+unsigned int valueSizeObject(void *ptr);
 
 void incrRefCount(robj *o);
 robj *resetRefCount(robj *obj);
@@ -1897,6 +1959,8 @@ void stopLoading(void);
 
 /* RDB persistence */
 #include "rdb.h"
+int rdbSaveInPenaltyClass(int dbnum, int pclass, char *filename);
+
 
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
@@ -1957,7 +2021,8 @@ int freeMemoryIfNeeded(void);
  * @author: cheng pan
  * @date: 2018.10.21
  */
-int freePenaltyClassMemoryIfNeeded(void);
+int freeMemoryIfNeeded_test(void);
+void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEntry *pool);
 
 int processCommand(redisClient *c);
 void setupSignalHandlers(void);
@@ -2112,6 +2177,12 @@ void setKey(redisDb *db, robj *key, robj *val);
 int dbExists(redisDb *db, robj *key);
 robj *dbRandomKey(redisDb *db);
 int dbDelete(redisDb *db, robj *key);
+/**
+ * 增加一个dbDumpKey操作
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */ 
+int dbDumpKey(redisDb *db, robj *key);
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o);
 long long emptyDb(void(callback)(void*));
 int selectDb(redisClient *c, int id);

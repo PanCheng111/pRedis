@@ -968,7 +968,7 @@ int incrementallyRehash(int dbid) {
  * for dict.c to resize the hash tables accordingly to the fact we have o not
  * running childs. */
 void updateDictResizePolicy(void) {
-    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
+    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 && server.pclass_rdb_child_pid == -1)
         dictEnableResize();
     else
         dictDisableResize();
@@ -1535,7 +1535,7 @@ void updateCachedTime(void) {
  */
 
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
-    int j;
+    int j, k, l;
     REDIS_NOTUSED(eventLoop);
     REDIS_NOTUSED(id);
     REDIS_NOTUSED(clientData);
@@ -1636,7 +1636,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * a BGSAVE was in progress. */
     // 如果 BGSAVE 和 BGREWRITEAOF 都没有在执行
     // 并且有一个 BGREWRITEAOF 在等待，那么执行 BGREWRITEAOF
-    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
+    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 && server.pclass_rdb_child_pid == -1 &&
         server.aof_rewrite_scheduled)
     {
         rewriteAppendOnlyFileBackground();
@@ -1644,7 +1644,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
     // 检查 BGSAVE 或者 BGREWRITEAOF 是否已经执行完毕
-    if (server.rdb_child_pid != -1 || server.aof_child_pid != -1) {
+    if (server.rdb_child_pid != -1 || server.aof_child_pid != -1 || server.pclass_rdb_child_pid != -1) {
         int statloc;
         pid_t pid;
 
@@ -1655,8 +1655,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             
             if (WIFSIGNALED(statloc)) bysignal = WTERMSIG(statloc);
 
+            if (pid == server.pclass_rdb_child_pid) {
+                backgroundSaveInPenaltyClassDoneHandler(exitcode,bysignal);
+            }
             // BGSAVE 执行完毕
-            if (pid == server.rdb_child_pid) {
+            else if (pid == server.rdb_child_pid) {
                 backgroundSaveDoneHandler(exitcode,bysignal);
 
             // BGREWRITEAOF 执行完毕
@@ -1723,6 +1726,119 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
          }
     }
 
+    if (server.auto_release_pclass_space) {
+        run_with_period(1000 * 10) { // 10s 进行一次检查
+            /**
+             * 检查每个数据库中的每个class，如果有某个类的访问频率低于10次/分钟，并且没有进行过dump操作，则进行一次后台的save操作
+             * @author: cheng pan
+             * @date: 2018.11.19
+             */
+            if (true/*server.rdb_child_pid == -1 && server.aof_child_pid == -1 && server.pclass_rdb_child_pid == -1*/) {
+                // 没有后台进行save操作，则判断是否要进行压缩内存操作
+                for (j = 0; j < server.dbnum; j++) {
+                    redisDb *db = server.db+j;
+                    if (dictSize(db->dict) > 0) {
+                        for (k = 1; k < REDIS_MAX_PENALTY_CLASS; k++) 
+                            if (db->pclass_mem_used[k] > db->pclass_mem_to_reach_agreement[k] &&
+                                db->pclass_access_cnt[k] <= 10) {
+                                db->pclass_mem_to_reach_agreement[k] = REDIS_MEM_ALLOC_GRAND; // 最后只保留一个分配单位的值；
+                                redisLog(REDIS_NOTICE, "db[%d] pclass[%d] needs to dump, mem_used = %lld, mem_to_reach_agreement = %lld", j, k, db->pclass_mem_used[k], db->pclass_mem_to_reach_agreement[k]);
+                                char filename[30];
+                                snprintf(filename, 30, "dump_%d_%d.rdb", j, k);
+                                rdbSaveInPenaltyClass(j, k, filename);
+                                /**
+                                 * 这里需要调整每个class所分配的内存大小，默认这次直接将rdb load的class的分配额直接设置到使用值。
+                                 * 策略是：除了当前pclass之外的class， 每个类按照自己的mem alloc值大小均摊减少一部分内存大小。
+                                 * @author: cheng pan
+                                 * @date: 2018.12.5
+                                 */
+                                int pclass = k;
+                                db->rth_rec[pclass]->tot_penalty = 0; // 为了清除dp带来的影响。
+                                int mem_delta = db->pclass_mem_alloc[pclass] - db->pclass_mem_used[pclass];
+                                if (mem_delta > 0) {
+                                    int nums = 0;
+                                    db->pclass_mem_alloc[pclass] = db->pclass_mem_used[pclass];
+                                    for (l = 0; l < REDIS_MAX_PENALTY_CLASS; l++) 
+                                        if (l != pclass && db->pclass_mem_alloc[l] > 0) nums += db->pclass_mem_alloc[l];
+                                    for (l = 0; l < REDIS_MAX_PENALTY_CLASS; l++) {
+                                        if (l != pclass && db->pclass_mem_alloc[l] > 0) {
+                                            db->pclass_mem_alloc[l] += mem_delta * db->pclass_mem_alloc[l] / nums;
+                                            printf("after dump: pclass_mem_alloc[%d] = %lld, pclass_mem_used[%d] = %lld\n", l, db->pclass_mem_alloc[l], l, db->pclass_mem_used[l]);
+                                        }
+                                    }
+                                }
+                                break; // 每次找到一个penalty class进行dump操作
+                            }
+                    }
+                }
+                // 在每个1分钟内，清空penalty class的访问计数
+                for (j = 0; j < server.dbnum; j++) {
+                    redisDb *db = server.db+j;
+                    if (dictSize(db->dict) > 0) {
+                        for (k = 1; k < REDIS_MAX_PENALTY_CLASS; k++) 
+                            db->pclass_access_cnt[k] = 0;
+                    }
+                }
+            }
+        }
+        run_with_period(1000) { // 一秒检查一次
+            for (j = 0; j < server.dbnum; j++) {
+                redisDb *db = server.db+j;
+                if (listFirst(db->pclass_needs_load_back) != NULL) {
+                    listNode *li = listFirst(db->pclass_needs_load_back);
+                    char filename[30]; int pclass = (long long)li->value;
+                    snprintf(filename, 30, "dump_%d_%d.rdb", db->id, pclass);
+                    redisLog(REDIS_NOTICE, "Start loading penalty class file %s.", filename);
+                    g_loaded_dump = 1;
+                    int load_ret = rdbLoad(filename);
+                    g_loaded_dump = 0;
+                    if (load_ret == REDIS_OK) {
+                        redisLog(REDIS_NOTICE, "Load penalty class file %s done.", filename);
+                        /**
+                         * 当一个class被重新加载后，因为访问的时长不会占据整个采样周期，所以需要将采样得到的penalty进行方法
+                         * 记录一个当前采样开始的时间戳，之后在dp的时候，可以根据这个时间戳计算出实际的采样长度，然后将tot_penalty放缩到正常的采样时长
+                         * @author: cheng pan
+                         * @date: 2018.12.7
+                         */
+                        //db->pclass_access_cnt_timestamp[pclass] = db->access_cnt;
+                        db->access_cnt = 0;
+                        for (k = 0; k < REDIS_MAX_PENALTY_CLASS; k++)
+                            db->rth_rec[k]->tot_penalty = 0;
+                        
+                        /**
+                         * 这里需要调整每个class所分配的内存大小，默认这次直接将rdb load的class的分配额直接设置到使用值。
+                         * 策略是：除了当前pclass之外的class， 每个类按照自己的mem alloc值大小均摊减少一部分内存大小。
+                         * @author: cheng pan
+                         * @date: 2018.12.5
+                         */
+                        int mem_delta = db->pclass_mem_used[pclass] - db->pclass_mem_alloc[pclass];
+                        if (mem_delta > 0) {
+                            int nums = 0;
+                            db->pclass_mem_alloc[pclass] = db->pclass_mem_used[pclass];
+                            for (k = 0; k < REDIS_MAX_PENALTY_CLASS; k++) 
+                                if (k != pclass && db->pclass_mem_alloc[k] > 0) nums += db->pclass_mem_alloc[k];
+                            for (k = 0; k < REDIS_MAX_PENALTY_CLASS; k++) {
+                                if (k != pclass && db->pclass_mem_alloc[k] > 0) {
+                                    db->pclass_mem_alloc[k] -= mem_delta * db->pclass_mem_alloc[k] / nums;
+                                    printf("pclass_mem_alloc[%d] = %lld, pclass_mem_used[%d] = %lld\n", k, db->pclass_mem_alloc[k], k, db->pclass_mem_used[k]);
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        redisLog(REDIS_WARNING,"Fatal error loading the DB: %s. Exiting.", strerror(errno));
+                        exit(1);
+                    }
+                    for (k = 1; k < REDIS_MAX_PENALTY_CLASS; k++) {
+                        printf("pclass_mem_used[%d] = %lld, pclass_mem_alloc[%d] = %lld\n", k, db->pclass_mem_used[k], k, db->pclass_mem_alloc[k]);
+                    }
+                    db->pclass_dump_miss_cnt[pclass] = 0;
+                    // g_loaded_dump = 1;
+                    listDelNode(db->pclass_needs_load_back, li);
+                }
+            }
+        }
+    }
     // 根据 AOF 政策，
     // 考虑是否需要将 AOF 缓冲区中的内容写入到 AOF 文件中
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
@@ -2023,6 +2139,18 @@ void initServerConfig() {
      * @date: 2018.11.18
      */
     server.auto_detect_penalty_class = 1;
+    /**
+     * 默认关闭自动释放pclass 内存的功能
+     * @author: cheng pan
+     * @date: 2018.12.5
+     */
+    server.auto_release_pclass_space = 0;
+    /**
+     * 初始化server中使用的内存大小
+     * @author: cheng pan
+     * @date: 2018.12.5
+     */
+    server.tot_mem = 0; 
 
     // 初始化 LRU 时间
     server.lruclock = getLRUClock();
@@ -2367,9 +2495,16 @@ void initServer() {
             server.db[j].pclass_hit_penalty_cnt[i] = 0;
             server.db[j].pclass_avg_miss_penalty[i] = 0;
             server.db[j].pclass_miss_penalty_cnt[i] = 0;
+            server.db[j].pclass_outlier_miss_penalty[i] = 0;
+            server.db[j].pclass_access_cnt[i] = 0;
+            server.db[j].pclass_dump_miss_cnt[i] = 0;
+            server.db[j].pclass_mem_to_reach_agreement[i] = 0xFFFFFFFFFFFFL; //初始化成一个极大值
             //server.db[j].penalty_classes[i] = dictCreate(&missDictType, NULL); //维护penalty class中的key
             server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
+            server.db[j].pclass_access_cnt_timestamp[i] = 0; // 记录在一个class加载一个dump文件之后，记录一个周期内的时间戳。
         }
+        server.db[j].pclass_needs_load_back = listCreate();
+        listSetValueSizeMethod(server.db[j].pclass_needs_load_back, valueSizeVoid);
         /**
          * 在db中增加reuse time采样的支持，维护当前采样的key的访问时间，同时对于每个penalty class，维护一个rth record数据结构
          * @author: cheng pan
@@ -2424,6 +2559,13 @@ void initServer() {
     server.cronloops = 0;
     server.rdb_child_pid = -1;
     server.aof_child_pid = -1;
+    /**
+     * 初始化pclass的dump进程pid为-1
+     * @author: cheng pan
+     * @date: 2018.11.20
+     */
+    server.pclass_rdb_child_pid = -1;
+
     aofRewriteBufferReset();
     server.aof_buf = sdsempty();
     server.lastsave = time(NULL); /* At startup we consider the DB saved. */
@@ -2804,11 +2946,14 @@ void call(redisClient *c, int flags) {
     unsigned int size_after_proc = 0;
     long long last_access_time = 0;
     int need_to_sample = 0;
+    int pclass = 0;
     if (c->cmd->firstkey == 1) {
         need_to_sample = ((unsigned)(dictHashKey(c->db->dict, c->argv[1]->ptr) % 1000) < 1000);
         if (need_to_sample) size_before_proc = getKeyValueSize(c->db, c->argv[1]); //获取操作前，该key所占用的字节大小；如果是0，表示该key不存在
+        // 注意， 如果该key没有被加入到redis中，则pclass会返回-1。此时相当于cold miss，我们不做任何处理直到该key被setback回来。
+        pclass = getPenaltyClass(c->db, c->argv[1]); 
+        if (pclass > 0) c->db->pclass_access_cnt[pclass] ++;
     }
-
     // 计算命令开始执行的时间
     start = ustime();
     // 执行实现函数
@@ -2827,8 +2972,6 @@ void call(redisClient *c, int flags) {
         
         size_after_proc = getKeyValueSize(c->db, c->argv[1]);
         last_access_time = getLastAccessTime(c->db, c->argv[1]);
-        // 注意， 如果该key没有被加入到redis中，则pclass会返回-1。此时相当于cold miss，我们不做任何处理直到该key被setback回来。
-        int pclass = getPenaltyClass(c->db, c->argv[1]); 
         // 注意，如果该key还没有追踪到miss penalty， 返回-1。
         long long mspenalty = 0;
         if (server.auto_detect_penalty_class) mspenalty = getMissPenalty(c->db, c->argv[1]);
@@ -2879,6 +3022,19 @@ void call(redisClient *c, int flags) {
 
     c->db->access_cnt ++;
     /**
+     * 如果发现某个penalty class的采样时间不够，则重置access cnt以延长采样时间
+     * @author: cheng pan
+     * @date: 2018.12.8
+     */ 
+    // if (c->db->access_cnt == REDIS_DB_ADJUST_CNT) {
+    //     for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i ++) {
+    //             if (c->db->rth_rec[i]->tot_penalty > 0)
+    //                 if (REDIS_DB_ADJUST_CNT - c->db->pclass_access_cnt_timestamp[i] < REDIS_DB_ADJUST_CNT * 0.3) {
+    //                     c->db->access_cnt -= REDIS_DB_ADJUST_CNT * 0.3;
+    //                 }
+    //         }
+    // }
+    /**
      * 在这里进行动态规划的调整，给每个penalty class分配具体多少空间
      * @author: cheng pan
      * @date: 2018.10.23
@@ -2886,14 +3042,36 @@ void call(redisClient *c, int flags) {
     if (c->db->access_cnt == REDIS_DB_ADJUST_CNT) {
         printf("doing adjust ... \n");
         /**
+         * 将各个penalty class记录的tot_penalty按照采样时间的长度，等比例放缩到一个REDIS_DB_ADJUST_CNT时长。
+         * @author: cheng pan
+         * @date: 2018.12.7
+         */ 
+        //for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
+        //    if (c->db->rth_rec[i]->tot_penalty > 0)
+        //        c->db->rth_rec[i]->tot_penalty = c->db->rth_rec[i]->tot_penalty * REDIS_DB_ADJUST_CNT / (REDIS_DB_ADJUST_CNT - c->db->pclass_access_cnt_timestamp[i]);
+        /**
          * 需要计算除了meta data之外的，一共在key-value中消耗的内存是多少
          * @author: cheng pan
          * @date: 2018.11.3
          */
-        long long tot_mem = 0;
-        for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++) {
-          //  printf("pclass_mem_used[%d]=%d\n", i, c->db->pclass_mem_used[i]);
-            tot_mem += c->db->pclass_mem_used[i];
+        if (server.tot_mem == 0) {
+            for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
+            //  printf("pclass_mem_used[%d]=%d\n", i, c->db->pclass_mem_used[i]);
+                server.tot_mem += c->db->pclass_mem_used[i];
+            }
+            /**
+             * 为了防止每次分配都导致内存减少，在计算tot_mem时，自动对齐到REDIS_MEM_ALLOC_GRAND尺度。
+             * @author: cheng pan
+             * @date: 2018.12.5
+             */ 
+            if (server.tot_mem % REDIS_MEM_ALLOC_GRAND != 0) {
+                server.tot_mem = (server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1) * REDIS_MEM_ALLOC_GRAND;
+            }
+        }
+        
+        if (server.auto_detect_penalty_class == 0) {
+            for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
+                if (c->db->pclass_avg_miss_penalty[i]) printf("pclass_avg_miss_penalty[%d]=%lld\n", i, c->db->pclass_avg_miss_penalty[i]);
         }
        // printf("tot_mem = %lld\n", tot_mem);
         /**
@@ -2905,21 +3083,31 @@ void call(redisClient *c, int flags) {
 
         // 到达设置的进行调整的访问阈值，此处执行一次动态规划进行各个penalty class的大小
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
-            rthCalcMRC(c->db->rth_rec[i], tot_mem, REDIS_MEM_ALLOC_GRAND);
+            rthCalcMRC(c->db->rth_rec[i], server.tot_mem, REDIS_MEM_ALLOC_GRAND);
         // 每次动态规划的数组， 动态分配
-        int **bck = createIntMatrix(REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1, -1); // 用来记录反向路径的数组，可以用来求方案
-        double **f = createDoubleMatrix(REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1, 1e20); // 动态规划数组，用来求最小的miss penalty
+        int **bck = createIntMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1, -1); // 用来记录反向路径的数组，可以用来求方案
+        double **f = createDoubleMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1, 1e20); // 动态规划数组，用来求最小的miss penalty
         f[0][0] = 0;
         rthRec **rths = c->db->rth_rec;
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++) {
             printf("rth[%d]: tot_penalty: %lld\nmiss ratio: ", i, rths[i]->tot_penalty);
-            for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j++)
+            c->db->pclass_mem_to_reach_agreement[i] = server.tot_mem;
+            for (int j = 0; j <= server.tot_mem / REDIS_MEM_ALLOC_GRAND; j++) {
                 printf("%.3lf, ", rths[i]->mrc[j]);
-            printf("\n\n");
+                /**
+                 * 此处加入service agreement限制
+                 * 可以是关于miss rate的协议，也可以是关于latency的协议
+                 * @author: cheng pan
+                 * @date: 2018.11.20
+                 */ 
+                if (rths[i]->mrc[j] < 0.5 && j * REDIS_MEM_ALLOC_GRAND < c->db->pclass_mem_to_reach_agreement[i]) c->db->pclass_mem_to_reach_agreement[i] = j * REDIS_MEM_ALLOC_GRAND;
+            }
+            printf("\nagreement: %lld\n", c->db->pclass_mem_to_reach_agreement[i]);
         }
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
-            for (int j = 0; j <= tot_mem / REDIS_MEM_ALLOC_GRAND; j ++)
+            for (int j = 0; j <= server.tot_mem / REDIS_MEM_ALLOC_GRAND; j ++)
                 for (int k = 0; k <= j; k++) {
+                    if (c->db->pclass_mem_used[i] > 0 && j - k == 0) continue;
                     double t = f[i - 1][k] + rths[i]->tot_penalty * rths[i]->mrc[j - k];
                     if (t < f[i][j] || (t < f[i][j] + REDIS_EPS && abs(c->db->pclass_mem_used[i] - (j-k) * REDIS_MEM_ALLOC_GRAND) < abs(c->db->pclass_mem_used[i] - (j - bck[i][j]) * REDIS_MEM_ALLOC_GRAND))) {
                         f[i][j] = t;
@@ -2927,7 +3115,7 @@ void call(redisClient *c, int flags) {
                     }
                 }
         // 根据记录的逆向路径，求得各个penalty class的分配方案
-        for (int i = REDIS_MAX_PENALTY_CLASS - 1, j = tot_mem / REDIS_MEM_ALLOC_GRAND; i>0; i--) {
+        for (int i = REDIS_MAX_PENALTY_CLASS - 1, j = server.tot_mem / REDIS_MEM_ALLOC_GRAND; i>0; i--) {
         //    printf("f[%d][%d]=%.3lf\n", i, j, f[i][j]);
             int t = bck[i][j];
             c->db->pclass_mem_alloc[i] = (j - t) * REDIS_MEM_ALLOC_GRAND;
@@ -2935,8 +3123,8 @@ void call(redisClient *c, int flags) {
             j = t;
         }
         // 这里释放进行动态规划的辅助数组，以防止内存泄露
-        freeIntMatrix(bck, REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
-        freeDoubleMatrix(f, REDIS_MAX_PENALTY_CLASS + 1, tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
+        freeIntMatrix(bck, REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
+        freeDoubleMatrix(f, REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
         //exit(1);
         /**
          * 调整完分配方案之后，需要完成的工作有：
@@ -2944,8 +3132,10 @@ void call(redisClient *c, int flags) {
          * 2) 将db->current_penalty_class_turn改变一下，为了每个key的penalty class id可以在下一个阶段改变
          * 3) 清空db->access_cnt
          */
-        for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++)
+        for (int i = 0; i < REDIS_MAX_PENALTY_CLASS; i++) {
             rthClear(rths[i]);
+            c->db->pclass_access_cnt_timestamp[i] = 0; // 更新采样时间戳 2018.12.7
+        }
         c->db->current_penalty_class_turn ^= REDIS_PENALTY_CLASS_TURNS; // 更换下一个阶段的turn标志，(1<<10) <==> (1<<11)
         c->db->access_cnt = 0;
         /**
@@ -4290,11 +4480,12 @@ int freeMemoryIfNeeded(void) {
 int need_to_evit(redisDb *db, sds key) {
     robj *keyobj = createStringObject(key, sdslen(key));
     int pcid = getPenaltyClass(db, keyobj);
-    if (pcid > 0 && db->pclass_mem_used[pcid] > db->pclass_mem_alloc[pcid]) {
-        zfree(keyobj);
+    int kvsize = getKeyValueSize(db, keyobj);
+    zfree(keyobj);
+    if (pcid > 0 && kvsize > 0 && db->pclass_mem_used[pcid] > db->pclass_mem_alloc[pcid]) {
         return 1;
     }
-    zfree(keyobj);
+    //if (pcid <= 0 && kvsize > 0) return 1; // 如果还没有得到分类，默认是可以evict
     return 0;
 } 
 
@@ -4304,33 +4495,36 @@ int need_to_evit(redisDb *db, sds key) {
  * @date: 2018.11.6
  */ 
 int freeMemoryIfNeeded_test(void) {
-    size_t mem_used, mem_tofree, mem_freed;
+    size_t mem_used, mem_alloc, mem_tofree, mem_freed;
     int slaves = listLength(server.slaves);
-
+    if (g_loaded_dump == 1) {
+        return REDIS_OK; // 在redis加载dump文件时，禁用内存淘汰机制，在load完之后，再开放淘汰.
+        //redisAssertWithInfo(NULL, NULL, false);
+    }
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
     // 计算出 Redis 目前占用的内存总数，但有两个方面的内存不会计算在内：
     // 1）从服务器的输出缓冲区的内存
     // 2）AOF 缓冲区的内存
-    mem_used = zmalloc_used_memory();
-    if (slaves) {
-        listIter li;
-        listNode *ln;
+    // mem_used = zmalloc_used_memory();
+    // if (slaves) {
+    //     listIter li;
+    //     listNode *ln;
 
-        listRewind(server.slaves,&li);
-        while((ln = listNext(&li))) {
-            redisClient *slave = listNodeValue(ln);
-            unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
-            if (obuf_bytes > mem_used)
-                mem_used = 0;
-            else
-                mem_used -= obuf_bytes;
-        }
-    }
-    if (server.aof_state != REDIS_AOF_OFF) {
-        mem_used -= sdslen(server.aof_buf);
-        mem_used -= aofRewriteBufferSize();
-    }
+    //     listRewind(server.slaves,&li);
+    //     while((ln = listNext(&li))) {
+    //         redisClient *slave = listNodeValue(ln);
+    //         unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
+    //         if (obuf_bytes > mem_used)
+    //             mem_used = 0;
+    //         else
+    //             mem_used -= obuf_bytes;
+    //     }
+    // }
+    // if (server.aof_state != REDIS_AOF_OFF) {
+    //     mem_used -= sdslen(server.aof_buf);
+    //     mem_used -= aofRewriteBufferSize();
+    // }
 
 
     /**
@@ -4338,24 +4532,32 @@ int freeMemoryIfNeeded_test(void) {
      * @author: cheng pan
      * @date: 2018.11.4
      */ 
-    for (int j = 0; j < server.dbnum; j++)
-        mem_used -= calcAllExtraSize(server.db+j);
-
+    // for (int j = 0; j < server.dbnum; j++)
+    //     mem_used -= calcAllExtraSize(server.db+j);
+    mem_used = 0; mem_alloc = 0; int j, k;
+    for (j = 0; j < server.dbnum; j++) {
+        redisDb *db = server.db+j;
+        for (k = 1; k < REDIS_MAX_PENALTY_CLASS; k++) {
+            mem_used += db->pclass_mem_used[k];
+            mem_alloc += db->pclass_mem_alloc[k];
+        }
+    }
     /* Check if we are over the memory limit. */
     // 如果目前使用的内存大小比设置的 maxmemory 要小，那么无须执行进一步操作
-    if (mem_used <= server.maxmemory) return REDIS_OK;
+    if (mem_used <= mem_alloc) return REDIS_OK;
 
     // 如果占用内存比 maxmemory 要大，但是 maxmemory 策略为不淘汰，那么直接返回
     if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
         return REDIS_ERR; /* We need to free memory, but policy forbids. */
 
+    
     /* Compute how much memory we need to free. */
     // 计算需要释放多少字节的内存
-    mem_tofree = mem_used - server.maxmemory;
+    mem_tofree = mem_used - mem_alloc;
 
     // 初始化已释放内存的字节数为 0
     mem_freed = 0;
-
+    // redisLog(REDIS_NOTICE, "enter free memory test, need to free = %lld", mem_tofree);
     // 根据 maxmemory 策略，
     // 遍历字典，释放内存并记录被释放内存的字节数
     while (mem_freed < mem_tofree) {
@@ -4467,11 +4669,14 @@ int freeMemoryIfNeeded_test(void) {
                  * AOF and Output buffer memory will be freed eventually so
                  * we only care about memory used by the key space. */
                 // 计算删除键所释放的内存数量
-                delta = (long long) zmalloc_used_memory();
+                //delta = (long long) zmalloc_used_memory();
+                delta = getKeyValueSize(db, keyobj);
                 dbDelete(db,keyobj);
-                delta -= (long long) zmalloc_used_memory();
+                //delta -= (long long) zmalloc_used_memory();
                 mem_freed += delta;
-                
+                // if (g_loaded_dump == 1) {
+                //     printf("key = %s, delta = %lld, mem_freed = %lld\n", bestkey, delta, mem_freed);
+                // }
                 // 对淘汰键的计数器增一
                 server.stat_evictedkeys++;
 
@@ -4491,7 +4696,7 @@ int freeMemoryIfNeeded_test(void) {
 
         if (!keys_freed) return REDIS_ERR; /* nothing to free... */
     }
-
+    // redisLog(REDIS_NOTICE, "free memory test done.");
     return REDIS_OK;
 }
 
@@ -4904,8 +5109,9 @@ void redisSetProcTitle(char *title) {
 }
 
 int main(int argc, char **argv) {
-
+    g_loaded_dump = 0;
 #ifdef TEST
+    g_loaded_dump = 0;
     printf("sizeof(redisobj) = %d\n", sizeof(struct redisObject));
     robj *r = (robj *)zmalloc(sizeof(struct redisObject));
     printf("zmalloc_size(robj) = %d\n", zmalloc_size(r));

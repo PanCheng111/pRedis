@@ -40,6 +40,8 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 
+
+// static FILE *fdebug = NULL;
 /*
  * 将长度为 len 的字符数组 p 写入到 rdb 中。
  *
@@ -658,6 +660,16 @@ int rdbLoadDoubleValue(rio *rdb, double *val) {
  */
 int rdbSaveObjectType(rio *rdb, robj *o) {
 
+    /**
+     * 当value已经被dump到外存时
+     * 直接做一个标记
+     * @author: cheng pan
+     * @date: 2018.11.21
+     */ 
+    if ((long long)o == REDIS_VALUE_HAS_BEEN_DUMPED) {
+        return rdbSaveType(rdb, REDIS_RDB_TYPE_VALUE_DUMPED);
+    }
+
     switch (o->type) {
 
     case REDIS_STRING:
@@ -912,7 +924,12 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
      */
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
-    if (rdbSaveObject(rdb,val) == -1) return -1;
+    /**
+     * 在当前val不是被dump到外存时，才进行写操作
+     * @author: cheng pan
+     * @date: 2018.11.21
+     */ 
+    if ((long long)val != REDIS_VALUE_HAS_BEEN_DUMPED && rdbSaveObject(rdb,val) == -1) return -1;
 
     return 1;
 }
@@ -1064,6 +1081,195 @@ werr:
     return REDIS_ERR;
 }
 
+/**
+ * 判断该penalty class是否该dump
+ * @author: cheng pan
+ * @date: 2018.11.6
+ */
+int need_to_dump(redisDb *db, sds key, int pclass) {
+    robj *keyobj = createStringObject(key, sdslen(key));
+    int pcid = getPenaltyClass(db, keyobj);
+    if (pcid == pclass) {
+        zfree(keyobj);
+        return 1;
+    }
+    zfree(keyobj);
+    return 0;
+} 
+
+/* Save the DB on disk. Return REDIS_ERR on error, REDIS_OK on success 
+ *
+ * 将数据库某个penalty class中的cold data保存到磁盘上。
+ * 保存成功返回 REDIS_OK ，出错/失败返回 REDIS_ERR 。
+ * @author: cheng pan
+ * @date: 2018.11.19
+ */
+int rdbSaveInPenaltyClass(int dbnum, int pclass, char *filename) {
+    dictEntry *de;
+    char tmpfile[256];
+    char magic[10];
+    long long now = mstime();
+    FILE *fp;
+    rio rdb;
+    uint64_t cksum;
+
+    // 创建临时文件
+    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
+    fp = fopen(tmpfile,"w");
+    if (!fp) {
+        redisLog(REDIS_WARNING, "Failed opening .rdb for saving pclass[%d] of db[%d]: %s", pclass, dbnum, 
+            strerror(errno));
+        return REDIS_ERR;
+    }
+
+    // 初始化 I/O
+    rioInitWithFile(&rdb,fp);
+
+    // 设置校验和函数
+    if (server.rdb_checksum)
+        rdb.update_cksum = rioGenericUpdateChecksum;
+
+    // 写入 RDB 版本号
+    snprintf(magic,sizeof(magic),"REDIS%04d",REDIS_RDB_VERSION);
+    if (rdbWriteRaw(&rdb,magic,9) == -1) goto werr;
+
+    //for (j = 0; j < server.dbnum; j++) {
+
+    // 指向数据库
+    redisDb *db = server.db + dbnum;
+    // 指向数据库键空间
+    dict *dict = db->dict;
+
+    /* Write the SELECT DB opcode 
+     * 写入 DB 选择器
+     */
+    if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
+    if (rdbSaveLen(&rdb,dbnum) == -1) goto werr;
+
+    long long to_free = db->pclass_mem_used[pclass] - db->pclass_mem_to_reach_agreement[pclass];
+    long long mem_freed = 0; int k;
+    int dumped_keys = 0;
+
+    while (mem_freed < to_free) {
+        struct evictionPoolEntry *pool = db->eviction_pool;
+        sds bestkey = NULL;
+        while(bestkey == NULL) {
+            evictionPoolPopulate(dict, db->dict, db->eviction_pool);
+            /* Go backward from best to worst element to evict. */
+            for (k = REDIS_EVICTION_POOL_SIZE-1; k >= 0; k--) {
+                if (pool[k].key == NULL) continue;
+                de = dictFind(dict,pool[k].key);
+
+                /* Remove the entry from the pool. */
+                sdsfree(pool[k].key);
+                /* Shift all elements on its right to left. */
+                memmove(pool+k,pool+k+1,
+                    sizeof(pool[0])*(REDIS_EVICTION_POOL_SIZE-k-1));
+                /* Clear the element on the right which is empty
+                 * since we shifted one position to the left.  */
+                pool[REDIS_EVICTION_POOL_SIZE-1].key = NULL;
+                pool[REDIS_EVICTION_POOL_SIZE-1].idle = 0;
+
+                /**
+                 * 注意，在采样的过程中，遇到已经dump的key，不要采样进去
+                 * @author: cheng pan
+                 * @date: 2018.11.20
+                 */ 
+                if (de && dictGetSignedIntegerVal(de) != REDIS_VALUE_HAS_BEEN_DUMPED && need_to_dump(db, dictGetKey(de), pclass)) {
+                    bestkey = dictGetKey(de);
+                    break;
+                } else {
+                    /* Ghost... */
+                    continue;
+                }
+            }
+        }
+        // 删除被选中的键
+        if (bestkey) {
+            de = dictFind(dict, bestkey);
+            long long delta;
+            robj key, *o = dictGetVal(de);
+            long long expire;
+            initStaticStringObject(key, bestkey);
+            // 获取键的过期时间
+            expire = getExpire(db,&key);
+            // 保存键值对数据
+            if (rdbSaveKeyValuePair(&rdb,&key,o,expire,now) == -1) goto werr;
+            // propagateExpire(db,keyobj);
+            // 计算删除键所释放的内存数量
+            //delta = (long long) zmalloc_used_memory();
+            //dbDelete(db,keyobj);
+            delta = getKeyValueSize(db, &key);
+            dbDumpKey(db, &key);
+            //delta -= (long long) zmalloc_used_memory();
+            //printf("freed mem = %lld\n", delta + calcObjectSize(dictGetKey(de)));
+            mem_freed += delta; // 注意：因为dbDumpKey不会将key在内存中删除，所以这里假装删除了key来计算释放的空间大小。
+            dumped_keys ++;
+        }
+    }
+
+    redisLog(REDIS_NOTICE, "dumped_kyes = %d, mem_freed = %lld, pclass_mem_used[%d] = %lld", dumped_keys, mem_freed, pclass, db->pclass_mem_used[pclass]);
+
+    /* EOF opcode 
+     *
+     * 写入 EOF 代码
+     */
+    if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_EOF) == -1) goto werr;
+
+    /* CRC64 checksum. It will be zero if checksum computation is disabled, the
+     * loading code skips the check in this case. 
+     *
+     * CRC64 校验和。
+     *
+     * 如果校验和功能已关闭，那么 rdb.cksum 将为 0 ，
+     * 在这种情况下， RDB 载入时会跳过校验和检查。
+     */
+    cksum = rdb.cksum;
+    memrev64ifbe(&cksum);
+    rioWrite(&rdb,&cksum,8);
+
+    /* Make sure data will not remain on the OS's output buffers */
+    // 冲洗缓存，确保数据已写入磁盘
+    if (fflush(fp) == EOF) goto werr;
+    if (fsync(fileno(fp)) == -1) goto werr;
+    if (fclose(fp) == EOF) goto werr;
+
+    /* Use RENAME to make sure the DB file is changed atomically only
+     * if the generate DB file is ok. 
+     *
+     * 使用 RENAME ，原子性地对临时文件进行改名，覆盖原来的 RDB 文件。
+     */
+    if (rename(tmpfile,filename) == -1) {
+        redisLog(REDIS_WARNING,"Error moving temp DB file on the final destination: %s", strerror(errno));
+        unlink(tmpfile);
+        return REDIS_ERR;
+    }
+
+    // 写入完成，打印日志
+    redisLog(REDIS_NOTICE,"Penalty Class Data saved on disk");
+
+    // 清零数据库脏状态
+    // server.dirty = 0;
+
+    // 记录最后一次完成 SAVE 的时间
+    // db->pclass_lastsave[pclass] = time(NULL);
+
+    // 记录最后一次执行 SAVE 的状态
+   // db->lastbgsave_status[pclass] = REDIS_OK;
+
+    return REDIS_OK;
+
+werr:
+    // 关闭文件
+    fclose(fp);
+    // 删除文件
+    unlink(tmpfile);
+
+    redisLog(REDIS_WARNING,"Write error saving DB on disk: %s", strerror(errno));
+
+    return REDIS_ERR;
+}
+
 int rdbSaveBackground(char *filename) {
     pid_t childpid;
     long long start;
@@ -1141,6 +1347,75 @@ int rdbSaveBackground(char *filename) {
     return REDIS_OK; /* unreached */
 }
 
+int rdbSaveBackgroundInPenaltyClass(int dbnum, int pclass, char *filename) {
+    pid_t childpid;
+    // long long start;
+    // redisDb *db = server.db + dbnum;
+
+    // 如果 BGSAVE 已经在执行，那么出错
+    if (server.pclass_rdb_child_pid != -1) return REDIS_ERR;
+
+    // fork() 开始前的时间，记录 fork() 返回耗时用
+    // start = ustime();
+
+    if ((childpid = fork()) == 0) {
+        int retval;
+
+        /* Child */
+
+        // 关闭网络连接 fd
+        closeListeningSockets(0);
+
+        // 设置进程的标题，方便识别
+        redisSetProcTitle("redis-pclass-rdb-bgsave");
+
+        // 执行保存操作
+        retval = rdbSaveInPenaltyClass(dbnum, pclass, filename);
+
+        // 打印 copy-on-write 时使用的内存数
+        if (retval == REDIS_OK) {
+            size_t private_dirty = zmalloc_get_private_dirty();
+
+            if (private_dirty) {
+                redisLog(REDIS_NOTICE,
+                    "pclass RDB: %zu MB of memory used by copy-on-write",
+                    private_dirty/(1024*1024));
+            }
+        }
+
+        // 向父进程发送信号
+        exitFromChild((retval == REDIS_OK) ? 0 : 1);
+
+    } else {
+
+        /* Parent */
+
+        // 计算 fork() 执行的时间
+        //db->stat_fork_time = ustime()-start;
+
+        // 如果 fork() 出错，那么报告错误
+        if (childpid == -1) {
+            //db->lastbgsave_status = REDIS_ERR;
+            redisLog(REDIS_WARNING,"Can't save pclass class[%d] of db[%d] in background: fork: %s",
+                pclass, dbnum, strerror(errno));
+            return REDIS_ERR;
+        }
+
+        // 打印 BGSAVE 开始的日志
+        redisLog(REDIS_NOTICE,"Background saving in pclass[%d] of db[%d] started by pid %d", pclass, dbnum, childpid);
+
+        // 记录负责执行 BGSAVE 的子进程 ID
+        server.pclass_rdb_child_pid = childpid;
+
+        // 关闭自动 rehash
+        updateDictResizePolicy();
+
+        return REDIS_OK;
+    }
+
+    return REDIS_OK; /* unreached */
+}
+
 /*
  * 移除 BGSAVE 所产生的临时文件
  *
@@ -1165,6 +1440,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
     robj *o, *ele, *dec;
     size_t len;
     unsigned int i;
+
+    // fprintf(fdebug, "rdbtype = %d\n", rdbtype);
+    // fprintf(fdebug, "after3, pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+    // fflush(fdebug);
 
     // 载入字符串对象
     if (rdbtype == REDIS_RDB_TYPE_STRING) {
@@ -1357,7 +1636,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             robj *field, *value;
 
             len--;
-
+            // fprintf(fdebug, "first ziplist encode\n");
+            // fprintf(fdebug, "after3, pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);
             /* Load raw strings */
             // 载入域（一个字符串）
             field = rdbLoadStringObject(rdb);
@@ -1384,9 +1665,14 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             if (sdslen(field->ptr) > server.hash_max_ziplist_value ||
                 sdslen(value->ptr) > server.hash_max_ziplist_value)
             {
+                // fprintf(fdebug, "second turn into hashtable encode\n");
+                // fprintf(fdebug, "before convert: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+                // fflush(fdebug);
                 decrRefCount(field);
                 decrRefCount(value);
                 hashTypeConvert(o, REDIS_ENCODING_HT);
+                // fprintf(fdebug, "after convert: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+                // fflush(fdebug);
                 break;
             }
             decrRefCount(field);
@@ -1399,7 +1685,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
          */
         while (o->encoding == REDIS_ENCODING_HT && len > 0) {
             robj *field, *value;
-
+            // fprintf(fdebug, "before insert ht1: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);
             len--;
 
             /* Load encoded strings */
@@ -1408,17 +1695,23 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
             if (field == NULL) return NULL;
             value = rdbLoadEncodedStringObject(rdb);
             if (value == NULL) return NULL;
-
+            // fprintf(fdebug, "before insert ht1.1: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);
             // 尝试编码
             field = tryObjectEncoding(field);
+            // fprintf(fdebug, "before insert ht1.2: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);            
             value = tryObjectEncoding(value);
-
+            // fprintf(fdebug, "before insert ht2: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);
             /* Add pair to hash table 
              *
              * 添加到哈希表
              */
             ret = dictAdd((dict*)o->ptr, field, value);
             redisAssert(ret == REDIS_OK);
+            // fprintf(fdebug, "before insert ht: pclass[12] = %lld, dictSize() = %d\n", server.db[0].pclass_mem_used[12], dictSize(server.db[0].dict));
+            // fflush(fdebug);            
         }
 
         /* All pairs should be read by now */
@@ -1528,7 +1821,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
 
             // ZIPLIST 编码的 HASH
             case REDIS_RDB_TYPE_HASH_ZIPLIST:
-
+                // fprintf(fdebug, "REDIS_RDB_TYPE_HASH_ZIPLIST here\n");
+                // fflush(fdebug);
                 o->type = REDIS_HASH;
                 o->encoding = REDIS_ENCODING_ZIPLIST;
 
@@ -1611,6 +1905,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     }
 }
 
+
 /*
  * 将给定 rdb 中保存的数据载入到数据库中。
  */
@@ -1650,6 +1945,13 @@ int rdbLoad(char *filename) {
 
     // 将服务器状态调整到开始载入状态
     startLoading(fp);
+    int loaded_keys = 0;
+    int loaded_mems = 0;
+    // int err_cnt = 0;
+
+    // if (fdebug == NULL) 
+    //     fdebug = fopen("debug.txt", "w");
+
     while(1) {
         robj *key, *val;
         expiretime = -1;
@@ -1663,7 +1965,8 @@ int rdbLoad(char *filename) {
          * 或者所有以 REDIS_RDB_OPCODE_* 为前缀的常量的其中一个
          */
         if ((type = rdbLoadType(&rdb)) == -1) goto eoferr;
-
+        // fprintf(fdebug, "after2, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+        // fflush(fdebug);
         // 读入过期时间值
         if (type == REDIS_RDB_OPCODE_EXPIRETIME) {
 
@@ -1723,19 +2026,46 @@ int rdbLoad(char *filename) {
             // 跳过
             continue;
         }
-
-        /* Read key 
-         *
-         * 读入键
+        // fprintf(fdebug, "after3, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+        // fflush(fdebug);
+        /**
+         * 如果当前key-value不是被dump到外存，则直接load，否则只能load key
+         * @author: cheng pan
+         * @date: 2018.11.21
          */
-        if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+        if (type != REDIS_RDB_TYPE_VALUE_DUMPED) { 
+            /* Read key 
+            *
+            * 读入键
+            */
+            // fprintf(fdebug, "after3.1, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+            // fflush(fdebug);
+            if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+            // fprintf(fdebug, "after3.2, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+            // fflush(fdebug);
 
-        /* Read value 
-         *
-         * 读入值
-         */
-        if ((val = rdbLoadObject(type,&rdb)) == NULL) goto eoferr;
-
+            /* Read value 
+            *
+            * 读入值
+            */
+            if ((val = rdbLoadObject(type,&rdb)) == NULL) goto eoferr;
+            // fprintf(fdebug, "after3.3, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+            // fflush(fdebug);
+        }
+        else {
+            /* Read key 
+            *
+            * 读入键
+            */
+            // fprintf(fdebug, "after3.4, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+            // fflush(fdebug);
+            if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+            val = (robj *)REDIS_VALUE_HAS_BEEN_DUMPED;
+            // fprintf(fdebug, "after3.5, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+            // fflush(fdebug);
+        }
+        // fprintf(fdebug, "after4, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+        // fflush(fdebug);
         /* Check if the key already expired. This function is used when loading
          * an RDB file from disk, either at startup, or when an RDB was
          * received from the master. In the latter case, the master is
@@ -1756,16 +2086,32 @@ int rdbLoad(char *filename) {
          *
          * 将键值对关联到数据库中
          */
+        // fprintf(fdebug, "after5, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+        // fflush(fdebug);
+        //int tmp = db->pclass_mem_used[12];
         dbAdd(db,key,val);
+        loaded_keys ++;
+        loaded_mems += getKeyValueSize(db, key);
+        // if (db->pclass_mem_used[12] - tmp != getKeyValueSize(db, key)) {
+        //     err_cnt ++;
+        // }
+        // redisLog(REDIS_NOTICE, "err_cnt = %d, loaded_keys = %d, loaded_mems = %d, pclass[12] = %lld, mem_delta_shoud = %d, mem_delta = %d, dictSize(12) = %d\n", err_cnt, loaded_keys, loaded_mems, db->pclass_mem_used[12], getKeyValueSize(db, key), db->pclass_mem_used[12] - tmp, dictSize(db->dict));
+        // fprintf(fdebug, "key = %s, err_cnt = %d, loaded_keys = %d, loaded_mems = %d, pclass[12] = %lld, mem_delta_shoud = %d, mem_delta = %d, dictSize(12) = %d\n", key->ptr, err_cnt, loaded_keys, loaded_mems, db->pclass_mem_used[12], getKeyValueSize(db, key), db->pclass_mem_used[12] - tmp, dictSize(db->dict));
+        // fflush(fdebug);
+
+        //printf("reload key %s, kvsize = %u\n", key->ptr, tmp);
 
         /* Set the expire time if needed 
          *
          * 设置过期时间
          */
         if (expiretime != -1) setExpire(db,key,expiretime);
-
+        // fprintf(fdebug, "after 1, pclass[12] = %lld, dictSize() = %d\n", db->pclass_mem_used[12], dictSize(db->dict));
+        // fflush(fdebug);
         decrRefCount(key);
     }
+
+    redisLog(REDIS_NOTICE, "loaded_keys = %d, loeded_mems = %d\n", loaded_keys, loaded_mems);
 
     /* Verify the checksum if RDB version is >= 5 
      *
@@ -1843,6 +2189,45 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
 }
 
+/* A background saving child (BGSAVE) terminated its work. Handle this. 
+ *
+ * 处理 miss penalty class dump 完成时发送的信号
+ * @author: cheng pan
+ * @date: 2018.11.19
+ */
+void backgroundSaveInPenaltyClassDoneHandler(int exitcode, int bysignal) {
+
+    // BGSAVE 成功
+    if (!bysignal && exitcode == 0) {
+        redisLog(REDIS_NOTICE,
+            "Background saving in penalty class terminated with success");
+        //server.dirty = server.dirty - server.dirty_before_bgsave;
+        //server.lastsave = time(NULL);
+        //server.lastbgsave_status = REDIS_OK;
+
+    // BGSAVE 出错
+    } else if (!bysignal && exitcode != 0) {
+        redisLog(REDIS_WARNING, "Background saving in penalty class error");
+        //server.lastbgsave_status = REDIS_ERR;
+
+    // BGSAVE 被中断
+    } else {
+        redisLog(REDIS_WARNING,
+            "Background saving in penalty class terminated by signal %d", bysignal);
+        // 移除临时文件
+        rdbRemoveTempFile(server.pclass_rdb_child_pid);
+    }
+
+    // 更新服务器状态
+    server.pclass_rdb_child_pid = -1;
+    //server.rdb_save_time_last = time(NULL)-server.rdb_save_time_start;
+    //server.rdb_save_time_start = -1;
+
+    /* Possibly there are slaves waiting for a BGSAVE in order to be served
+     * (the first stage of SYNC is a bulk transfer of dump.rdb) */
+    // 处理正在等待 BGSAVE 完成的那些 slave
+    // updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
+}
 void saveCommand(redisClient *c) {
 
     // BGSAVE 已经在执行中，不能再执行 SAVE

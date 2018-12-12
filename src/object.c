@@ -332,7 +332,7 @@ robj *createListObject(void) {
      * @author: cheng pan
      * @date: 2018.9.19
      */ 
-    listSetValueSizeMethod(l, valueSizeVoid);  
+    listSetValueSizeMethod(l, valueSizeObject);  
 
     o->encoding = REDIS_ENCODING_LINKEDLIST;
     /**
@@ -607,8 +607,16 @@ void decrRefCountVoid(void *o) {
  * @author: cheng pan
  * @date： 2018.9.19
  */
-unsigned int valueSizeVoid(void *ptr) {
+unsigned int valueSizeObject(void *ptr) {
     return calcObjectSize((robj *)ptr);
+} 
+/**
+ * 判断一个值的size大小 [FIX BUG]
+ * @author: cheng pan
+ * @date： 2018.11.21
+ */
+unsigned int valueSizeVoid(void *ptr) {
+    return 0;
 } 
 
 /* This function set the ref count to zero without freeing the object.
@@ -1175,6 +1183,16 @@ char *strEncoding(int encoding) {
  * requested, using an approximated LRU algorithm. */
 // 使用近似 LRU 算法，计算出给定对象的闲置时长
 unsigned long long estimateObjectIdleTime(robj *o) {
+    /**
+     * 如果发现该value是已经被dump到外存
+     * 则优先淘汰这些key
+     * @author: cheng pan
+     * @date: 2018.11.20
+     */ 
+    if ((long long)o == REDIS_VALUE_HAS_BEEN_DUMPED) {
+        return 0xFFFFFFFF;
+    }
+
     unsigned long long lruclock = LRU_CLOCK();
     if (lruclock >= o->lru) {
         return (lruclock - o->lru) * REDIS_LRU_CLOCK_RESOLUTION;

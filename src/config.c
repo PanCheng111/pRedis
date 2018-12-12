@@ -523,7 +523,19 @@ void loadServerConfigFromString(char *config) {
                 server.auto_detect_penalty_class = 0;
                 printf("shutdown auto-detect-penalty-class\n");
             }
-        } else {
+        } 
+        /**
+         * 增加一个配置项，配置是否需要自动释放某个penalty class占用的内存（在workload压力较轻的情况下）
+         * @author: cheng pan
+         * @date: 2018.11.18
+         */
+        else if (!strcasecmp(argv[0],"auto-release-pclass-space") && argc == 2) {
+            if (!strcasecmp(argv[1], "yes")) {
+                server.auto_release_pclass_space = 1;
+                printf("open auto-release-pclass-space\n");
+            }
+        } 
+        else {
             err = "Bad directive or wrong number of arguments"; goto loaderr;
         }
         sdsfreesplitres(argv,argc);

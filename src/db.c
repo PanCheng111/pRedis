@@ -54,6 +54,42 @@ robj *lookupKey(redisDb *db, robj *key) {
     // 节点存在
     if (de) {
         
+        /**
+         * 检查这个key的value是否是已经被dump到外存，如果是，则返回NULL
+         * 如果发现这个key所属的penalty class已经累计达到10次，则将dump文件重新载入回来
+         * @author: cheng pan
+         * @date: 2018.11.20
+         */ 
+        if (dictGetSignedIntegerVal(de) == REDIS_VALUE_HAS_BEEN_DUMPED) {
+            int pclass = getPenaltyClass(db, key);
+            if (pclass > 0) db->pclass_dump_miss_cnt[pclass] ++;
+            if (db->pclass_dump_miss_cnt[pclass] > 10) {
+                listIter *iter = listGetIterator(db->pclass_needs_load_back, AL_START_HEAD);
+                listNode *node; int need_insert = 1;
+                while ((node = listNext(iter)) != NULL) {
+                    long long cur_pclass = (long long)node->value;
+                    if (cur_pclass == pclass) { need_insert = 0; break; }
+                }
+                if (need_insert) {
+                    long long tmp = pclass;
+                    listAddNodeTail(db->pclass_needs_load_back, (void *)tmp);
+                }
+                /*
+                char filename[30];
+                snprintf(filename, 30, "dump_%d_%d.rdb", db->id, pclass);
+                redisLog(REDIS_NOTICE, "Start loading penalty class file %s.", filename);
+                int load_ret = rdbLoad(filename);
+                if (load_ret == REDIS_OK)
+                    redisLog(REDIS_NOTICE, "Load penalty class file %s done.", filename);
+                else {
+                    redisLog(REDIS_WARNING,"Fatal error loading the DB: %s. Exiting.", strerror(errno));
+                    exit(1);
+                }
+                db->pclass_dump_miss_cnt[pclass] = 0;
+                */
+            }
+            return NULL;
+        } 
 
         // 取出值
         robj *val = dictGetVal(de);
@@ -347,9 +383,17 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
 
     // 尝试添加键值对
     int retval = dictAdd(db->dict, copy, val);
-
+    
     // 如果键已经存在，那么停止
-    redisAssertWithInfo(NULL,key,retval == REDIS_OK);
+    /**
+     * 如果键已经存在，那么可能是该key已经dump出去过，然后又从后端取回数据加入到数据库中，
+     * 但是一个penalty class只有发生了10次miss，才会将dump的rdb文件读取回来，所以在rdb加载的时候，也会使用dbAdd操作，这样导致了重复的key添加操作
+     * 此时直接跳过这个情况。
+     * @author: cheng pan
+     * @date: 2018.11.21
+     */ 
+    if (retval != REDIS_OK) return;
+    // redisAssertWithInfo(NULL,key,retval == REDIS_OK);
 
     /**
      * 在此时将value obj的size记录在db->size_pcid中
@@ -521,6 +565,30 @@ int dbDelete(redisDb *db, robj *key) {
     }
 }
 
+/* Delete a key, value, and associated expiration entry if any, from the DB 
+ *
+ * 从数据库中将给定的键的值dump到外存，并且key仍然留在内存中，并且标注这个key是被dump出去的。
+ * 注意，此时传入的robj *key不是在堆上分配的内存，而是栈上的变量，故不能直接访问计算长度
+ * dump成功返回 1 ，因为键不存在而导致删除失败时，返回 0 。
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */
+int dbDumpKey(redisDb *db, robj *key) {
+
+    dictEntry *de = dictFind(db->dict, key->ptr);
+    if (de != NULL) {
+        dictFreeVal(db->dict, de);
+        dictSetSignedIntegerVal(de, REDIS_VALUE_HAS_BEEN_DUMPED);
+        //因为此时传入的robj *key不是在堆上分配的内存，而是栈上的变量，故不能直接访问zmalloc_size()计算长度
+        //robj *keyobj = (robj *)dictGetKey(de);
+        setKeyValueSize(db, key, 0); // 此时的内存占用只剩下key的占用 + dictEntry占用的32字节, 但是需要设置该key-value的大小0;
+        return 1;
+    }
+    else {
+        // 键不存在
+        return 0;
+    }
+}
 /* Prepare the string object stored at 'key' to be modified destructively
  * to implement commands like SETBIT or APPEND.
  *
@@ -591,6 +659,12 @@ long long emptyDb(void(callback)(void*)) {
             server.db[j].pclass_mem_alloc[i] = 0; // 0 表示没有给每个penalty class分配对应的空间大小
             server.db[j].pclass_mem_used[i] = 0; // 0 表示目前每个penalty class占用的内存
             server.db[j].current_penalty_class_turn = (1<<10); // 初始化当前需要采集的penalty class id的turn
+            server.db[j].pclass_avg_hit_penalty[i] = 0;
+            server.db[j].pclass_hit_penalty_cnt[i] = 0;
+            server.db[j].pclass_avg_miss_penalty[i] = 0;
+            server.db[j].pclass_miss_penalty_cnt[i] = 0;
+            server.db[j].pclass_access_cnt[i] = 0;
+            server.db[j].pclass_mem_to_reach_agreement[i] = 0xFFFFFFFFFFFFL; //初始化成一个极大值
             rthClear(server.db[j].rth_rec[i]);
         }            
         dictEmpty(server.db[j].size_pcid, callback);
@@ -2058,6 +2132,19 @@ void setMissPenalty(redisDb *db, robj *key, long long penalty) {
     else { // 如果是手动设置了每个key的penalty class分类，那么直接维护整体class的miss penalty即可。
         int pcid = getPenaltyClass(db, key);
         if (pcid > 0) {
+            /**
+             * 此处表示发现一个penalty离群点，有可能预示该类别发生了整体penalty的变化
+             * 记录离群点的个数，一旦达到一个阈值，则将整个class的penalty进行修改
+             * @author: cheng pan
+             * @date: 2018.12.11
+             */ 
+            // if (labs(penalty - db->pclass_avg_miss_penalty[pcid]) >  db->pclass_avg_miss_penalty[pcid]) {
+            //     db->pclass_outlier_miss_penalty[pcid] ++;
+            //     if (db->pclass_outlier_miss_penalty[pcid] > 100) {
+            //         db->pclass_avg_miss_penalty[pcid] = penalty;
+            //         db->pclass_outlier_miss_penalty[pcid] = 0;
+            //     }
+            // }
             db->pclass_avg_miss_penalty[pcid] = (db->pclass_avg_miss_penalty[pcid] * db->pclass_miss_penalty_cnt[pcid] + penalty) / (db->pclass_miss_penalty_cnt[pcid] + 1);
             db->pclass_miss_penalty_cnt[pcid] ++;
         }

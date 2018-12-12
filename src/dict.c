@@ -575,8 +575,17 @@ dictEntry *dictAddRaw(dict *d, void *key)
     // 计算键在哈希表中的索引值
     // 如果值为 -1 ，那么表示键已经存在
     // T = O(N)
-    if ((index = _dictKeyIndex(d, key)) == -1)
+    if ((index = _dictKeyIndex(d, key)) == -1) {
+        /**
+         * 如果该key对应的value是被dump到外存了，则可以返回该entry
+         * @author: cheng pan
+         * @date: 2018.11.21
+         */ 
+        entry = dictFind(d, key);
+        //if (entry && dictGetSignedIntegerVal(entry) == 0) printf("add redundant key %s, val = %lld\n", dictGetKey(entry), dictGetSignedIntegerVal(entry));
+        if (entry != NULL && dictGetSignedIntegerVal(entry) == REDIS_VALUE_HAS_BEEN_DUMPED) return entry;
         return NULL;
+    }
 
     // T = O(1)
     /* Allocate the memory and store the new entry */
@@ -758,9 +767,21 @@ static int dictGenericDelete(dict *d, const void *key, int nofree)
                      * @date: 2018.10.09
                      */
                     d->size -= dictGetEntryKeySize(d, he);
+                    /**
+                     *  如果这个key的value已经被dump到外存，此时内存中已经没有该value
+                     * @author: cheng pan
+                     * @date: 2018.11.20
+                     */ 
+                    if (dictGetSignedIntegerVal(he) != REDIS_VALUE_HAS_BEEN_DUMPED)
                     d->size -= dictGetEntryValueSize(d, he);
 
                     dictFreeKey(d, he);
+                     /**
+                     *  如果这个key的value已经被dump到外存，此时内存中已经没有该value
+                     * @author: cheng pan
+                     * @date: 2018.11.20
+                     */ 
+                    if (dictGetSignedIntegerVal(he) != REDIS_VALUE_HAS_BEEN_DUMPED)
                     dictFreeVal(d, he);
                 }
                 
@@ -849,10 +870,14 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
              * @date: 2018.10.09
              */
             d->size -= dictGetEntryKeySize(d, he);
+            // 此处需要确定该value还没有被dump到外存
+            if (dictGetSignedIntegerVal(he) != REDIS_VALUE_HAS_BEEN_DUMPED)
             d->size -= dictGetEntryValueSize(d, he);
              
             dictFreeKey(d, he);
             // 删除值
+            // 此处需要确定该value还没有被dump到外存
+            if (dictGetSignedIntegerVal(he) != REDIS_VALUE_HAS_BEEN_DUMPED)
             dictFreeVal(d, he);
             
              /**

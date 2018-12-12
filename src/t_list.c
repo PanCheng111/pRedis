@@ -466,7 +466,7 @@ void listTypeConvert(robj *subject, int enc) {
          * @author: cheng pan
          * @date: 2018.9.19
          */ 
-        listSetValueSizeMethod(l, valueSizeVoid);  
+        listSetValueSizeMethod(l, valueSizeObject);  
 
         /* listTypeGet returns a robj with incremented refcount */
         // 遍历 ziplist ，并将里面的值全部添加到双端链表中

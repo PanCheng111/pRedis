@@ -66,6 +66,13 @@
 #define HIGH32BITMASK 0xFFFFFFFF00000000
 #define LOW32BITMASK 0x00000000FFFFFFFF
 
+/**
+ * 定义该key是否已经被dump到外存
+ * @author: cheng pan
+ * @date: 2018.11.20
+ */ 
+#define REDIS_VALUE_HAS_BEEN_DUMPED 0xFFFFFFFF
+
 /*
  * 哈希表节点
  */
