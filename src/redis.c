@@ -1744,7 +1744,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                                 db->pclass_mem_to_reach_agreement[k] = REDIS_MEM_ALLOC_GRAND; // 最后只保留一个分配单位的值；
                                 redisLog(REDIS_NOTICE, "db[%d] pclass[%d] needs to dump, mem_used = %lld, mem_to_reach_agreement = %lld", j, k, db->pclass_mem_used[k], db->pclass_mem_to_reach_agreement[k]);
                                 char filename[30];
-                                snprintf(filename, 30, "dump_%d_%d.rdb", j, k);
+                                snprintf(filename, 30, "dump_%d_%d_%d.rdb", j, k, getpid());
                                 rdbSaveInPenaltyClass(j, k, filename);
                                 /**
                                  * 这里需要调整每个class所分配的内存大小，默认这次直接将rdb load的class的分配额直接设置到使用值。
@@ -1787,7 +1787,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 if (listFirst(db->pclass_needs_load_back) != NULL) {
                     listNode *li = listFirst(db->pclass_needs_load_back);
                     char filename[30]; int pclass = (long long)li->value;
-                    snprintf(filename, 30, "dump_%d_%d.rdb", db->id, pclass);
+                    snprintf(filename, 30, "dump_%d_%d_%d.rdb", db->id, pclass, getpid());
                     redisLog(REDIS_NOTICE, "Start loading penalty class file %s.", filename);
                     g_loaded_dump = 1;
                     int load_ret = rdbLoad(filename);
@@ -2912,7 +2912,8 @@ void freeDoubleMatrix(double **matrix, int N, int M) {
     zfree(matrix);
 } 
 
-
+double sample_time = 0;
+int sample_cnt = 0;
 /* Call() is the core of Redis execution of a command */
 // 调用命令的实现函数，执行命令
 void call(redisClient *c, int flags) {
@@ -2920,6 +2921,14 @@ void call(redisClient *c, int flags) {
     long long dirty, start, duration;
     // 记录命令开始执行前的 FLAG
     int client_old_flags = c->flags;
+
+    /**
+     * 用来计算时间开销
+     * @author: cheng pan
+     * @date: 2019.1.1
+     */ 
+    struct timeval t1, t2;
+    double timeuse;
 
     /* Sent the command to clients in MONITOR mode, only if the commands are
      * not generated from reading an AOF. */
@@ -2969,7 +2978,8 @@ void call(redisClient *c, int flags) {
      * @date: 2018.10.22
      */
     if (c->cmd->firstkey == 1 && need_to_sample) {
-        
+        sample_cnt ++;
+        gettimeofday(&t1, NULL);
         size_after_proc = getKeyValueSize(c->db, c->argv[1]);
         last_access_time = getLastAccessTime(c->db, c->argv[1]);
         // 注意，如果该key还没有追踪到miss penalty， 返回-1。
@@ -3006,7 +3016,8 @@ void call(redisClient *c, int flags) {
             }
         }
         
-
+        gettimeofday(&t2, NULL);
+        sample_time += (t2.tv_sec - t1.tv_sec) * 1000000.0 + (t2.tv_usec - t1.tv_usec); 
         /**
          * 调试输出专用
          * @author: cheng pan
@@ -3040,7 +3051,9 @@ void call(redisClient *c, int flags) {
      * @date: 2018.10.23
      */ 
     if (c->db->access_cnt == REDIS_DB_ADJUST_CNT) {
-        printf("doing adjust ... \n");
+        printf("doing adjust ... \n");    
+        redisLog(REDIS_NOTICE, "Sample_time: %.3lf, cnt = %d", sample_time / sample_cnt, sample_cnt);
+        sample_cnt = 0;
         /**
          * 将各个penalty class记录的tot_penalty按照采样时间的长度，等比例放缩到一个REDIS_DB_ADJUST_CNT时长。
          * @author: cheng pan
@@ -3082,8 +3095,18 @@ void call(redisClient *c, int flags) {
         //if (server.maxmemory) tot_mem = server.maxmemory;
 
         // 到达设置的进行调整的访问阈值，此处执行一次动态规划进行各个penalty class的大小
+        /**
+         * 分析完成一次MRC计算内存分配需要多少时间
+         * @author: cheng pan
+         * @date: 2019.1.1
+         */ 
+        gettimeofday(&t1, NULL);
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
             rthCalcMRC(c->db->rth_rec[i], server.tot_mem, REDIS_MEM_ALLOC_GRAND);
+        gettimeofday(&t2, NULL);
+        timeuse = (t2.tv_sec - t1.tv_sec) * 1000000.0 + (t2.tv_usec - t1.tv_usec); 
+        redisLog(REDIS_NOTICE, "MRC time: %.6lf\n", timeuse);
+
         // 每次动态规划的数组， 动态分配
         int **bck = createIntMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1, -1); // 用来记录反向路径的数组，可以用来求方案
         double **f = createDoubleMatrix(REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1, 1e20); // 动态规划数组，用来求最小的miss penalty
@@ -3104,6 +3127,7 @@ void call(redisClient *c, int flags) {
             }
             printf("\nagreement: %lld\n", c->db->pclass_mem_to_reach_agreement[i]);
         }
+        gettimeofday(&t1, NULL);
         for (int i = 1; i < REDIS_MAX_PENALTY_CLASS; i++)
             for (int j = 0; j <= server.tot_mem / REDIS_MEM_ALLOC_GRAND; j ++)
                 for (int k = 0; k <= j; k++) {
@@ -3122,6 +3146,10 @@ void call(redisClient *c, int flags) {
             printf("pclass_mem_alloc[%d] = %lld, pclass_mem_used[%d] = %lld\n", i, c->db->pclass_mem_alloc[i], i, c->db->pclass_mem_used[i]);
             j = t;
         }
+        gettimeofday(&t2, NULL);
+        timeuse = (t2.tv_sec - t1.tv_sec) * 1000000.0 + (t2.tv_usec - t1.tv_usec); 
+        redisLog(REDIS_NOTICE, "DP time: %.6lf\n", timeuse);        
+
         // 这里释放进行动态规划的辅助数组，以防止内存泄露
         freeIntMatrix(bck, REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
         freeDoubleMatrix(f, REDIS_MAX_PENALTY_CLASS + 1, server.tot_mem / REDIS_MEM_ALLOC_GRAND + 1);
