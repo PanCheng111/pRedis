@@ -1744,7 +1744,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                                 db->pclass_mem_to_reach_agreement[k] = REDIS_MEM_ALLOC_GRAND; // 最后只保留一个分配单位的值；
                                 redisLog(REDIS_NOTICE, "db[%d] pclass[%d] needs to dump, mem_used = %lld, mem_to_reach_agreement = %lld", j, k, db->pclass_mem_used[k], db->pclass_mem_to_reach_agreement[k]);
                                 char filename[30];
-                                snprintf(filename, 30, "dump_%d_%d.rdb", j, k);
+                                snprintf(filename, 30, "dump_%d_%d_%d.rdb", j, k, getpid());
                                 rdbSaveInPenaltyClass(j, k, filename);
                                 /**
                                  * 这里需要调整每个class所分配的内存大小，默认这次直接将rdb load的class的分配额直接设置到使用值。
@@ -1787,7 +1787,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 if (listFirst(db->pclass_needs_load_back) != NULL) {
                     listNode *li = listFirst(db->pclass_needs_load_back);
                     char filename[30]; int pclass = (long long)li->value;
-                    snprintf(filename, 30, "dump_%d_%d.rdb", db->id, pclass);
+                    snprintf(filename, 30, "dump_%d_%d_%d.rdb", db->id, pclass, getpid());
                     redisLog(REDIS_NOTICE, "Start loading penalty class file %s.", filename);
                     g_loaded_dump = 1;
                     int load_ret = rdbLoad(filename);

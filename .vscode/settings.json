@@ -10,7 +10,8 @@
         "*.ipp": "c",
         "ratio": "c",
         "type_traits": "c",
-        "chrono": "c"
+        "chrono": "c",
+        "epoll.h": "c"
     },
     "C_Cpp.errorSquiggles": "Disabled"
 }
